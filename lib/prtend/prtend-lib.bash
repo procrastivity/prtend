@@ -67,20 +67,28 @@ prtend_log_error() {
 # -- repo identity ---------------------------------------------------------
 
 prtend_repo_slug() {
-  local url owner_repo
+  local url path repo owner
   if ! url="$(git remote get-url origin 2>/dev/null)"; then
     return 1
   fi
-  # Strip protocol/host and .git suffix; accept https://host/owner/repo(.git) and git@host:owner/repo(.git)
-  owner_repo="${url%.git}"
-  owner_repo="${owner_repo##*:}"          # drop "git@host:" if present
-  owner_repo="${owner_repo#https://*/}"   # drop "https://host/" if present
-  owner_repo="${owner_repo#http://*/}"
-  # Reduce to last two path segments.
-  local repo owner
-  repo="${owner_repo##*/}"
-  owner_repo="${owner_repo%/"$repo"}"
-  owner="${owner_repo##*/}"
+  url="${url%.git}"
+
+  # Normalize to a "<owner>/<repo>" path regardless of remote URL form.
+  if [[ "$url" == *"://"* ]]; then
+    # Scheme URLs: https://host/owner/repo, http://..., ssh://git@host/owner/repo.
+    path="${url#*://}"          # drop scheme
+    path="${path#*@}"           # drop optional user@
+    path="${path#*/}"           # drop host[:port]
+  elif [[ "$url" == *:* ]]; then
+    # scp-like: git@host:owner/repo
+    path="${url#*:}"
+  else
+    path="$url"
+  fi
+
+  repo="${path##*/}"
+  path="${path%/"$repo"}"
+  owner="${path##*/}"
   if [[ -z "$owner" || -z "$repo" ]]; then
     return 1
   fi
@@ -119,9 +127,10 @@ prtend_config_resolve() {
   printf '\n'
 }
 
-# Naive scalar lookup against the resolved YAML. Sufficient for v0 flat keys
-# (system_reviewers, optional_reviewers, watch_strategy, poll_interval_seconds,
-# ci_retry_limit). Lists return joined values on subsequent lines via grep -A.
+# Naive scalar lookup against the resolved YAML. Sufficient for v0 flat-scalar
+# keys (watch_strategy, poll_interval_seconds, ci_retry_limit). Returns only the
+# first matching scalar value; list-valued keys (system_reviewers,
+# optional_reviewers) are not handled here and must be read by the caller.
 prtend_config_get() {
   local key="${1:-}" path env_key value
   if [[ -z "$key" ]]; then
@@ -173,7 +182,8 @@ prtend_state_dir() {
 
 # -- atomic write ----------------------------------------------------------
 
-# Reads stdin, writes to <path> via tempfile + rename. Caller ensures parent dir exists.
+# Reads stdin, writes to <path> via tempfile + rename. Creates the parent
+# directory if missing.
 prtend_atomic_write() {
   local path="${1:-}" dir tmp
   if [[ -z "$path" ]]; then
