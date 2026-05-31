@@ -1,0 +1,17 @@
+# Local config / runtime
+.test-tmp/
+result
+result-*
+.direnv/
+
+# State (when in-repo)
+.claude/prtend-state/
+
+# Editor
+*.swp
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
