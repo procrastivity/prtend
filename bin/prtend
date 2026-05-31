@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# prtend — main dispatcher
+set -euo pipefail
+
+PRTEND_LIB="${PRTEND_LIB:-$(dirname "$(realpath "$0")")/../lib/prtend}"
+
+# shellcheck source=lib/prtend/prtend-lib.bash
+# shellcheck disable=SC1091
+source "$PRTEND_LIB/prtend-lib.bash"
+
+case "${1:-}" in
+  detect|pr-open|ci-watch|reviews-poll|watch|note-post|defer-write|config|doctor)
+    cmd="$1"; shift
+    fn="${cmd//-/_}"
+    # shellcheck disable=SC1090
+    source "$PRTEND_LIB/prtend-subcommands/${fn}.bash"
+    "prtend_cmd_${fn}" "$@"
+    ;;
+  -h|--help|help|"")
+    prtend_usage; exit 0 ;;
+  --version)
+    echo "prtend $(prtend_version)"; exit 0 ;;
+  *)
+    echo "prtend: unknown subcommand '$1'" >&2
+    prtend_usage >&2; exit 2 ;;
+esac
