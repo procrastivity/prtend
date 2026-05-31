@@ -161,7 +161,14 @@ prtend_config_get() {
   if [[ -z "$path" || ! -f "$path" ]]; then
     return 0
   fi
-  value="$(grep -E -- "^${key}:" "$path" | head -n1 | sed -E "s/^${key}:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^['\"]//; s/['\"]$//")"
+  # `grep` exits 1 on no-match, which under `set -euo pipefail` would abort
+  # the caller. Treat no-match as a normal empty result.
+  local raw
+  raw="$(grep -E -- "^${key}:" "$path" || true)"
+  if [[ -z "$raw" ]]; then
+    return 0
+  fi
+  value="$(printf '%s\n' "$raw" | head -n1 | sed -E "s/^${key}:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^['\"]//; s/['\"]$//")"
   printf '%s\n' "$value"
 }
 
