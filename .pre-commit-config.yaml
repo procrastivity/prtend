@@ -5,7 +5,7 @@ repos:
         name: shellcheck
         entry: shellcheck
         language: system
-        files: '\.(sh|bash)$'
+        files: '(\.(sh|bash)$|^bin/)'
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:

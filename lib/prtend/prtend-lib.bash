@@ -8,6 +8,10 @@ if [[ -n "${PRTEND_LIB_LOADED:-}" ]]; then
 fi
 PRTEND_LIB_LOADED=1
 
+# Defensive: callers should source under strict mode, but enable here too so
+# that ad-hoc `bash -c 'source lib; fn'` callers get the same safety.
+set -euo pipefail
+
 PRTEND_VERSION="0.1.0"
 PRTEND_VERBOSE="${PRTEND_VERBOSE:-0}"
 
@@ -119,7 +123,18 @@ prtend_config_resolve() {
 # (system_reviewers, optional_reviewers, watch_strategy, poll_interval_seconds,
 # ci_retry_limit). Lists return joined values on subsequent lines via grep -A.
 prtend_config_get() {
-  local key="$1" path env_key value
+  local key="${1:-}" path env_key value
+  if [[ -z "$key" ]]; then
+    prtend_log_error "prtend_config_get: missing key argument"
+    return 2
+  fi
+  # Reject keys that aren't safe identifiers — the value is interpolated into a
+  # grep regex and an env-var name below, so metacharacters or leading dashes
+  # would be unsafe or could be mistaken for flags.
+  if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    prtend_log_error "prtend_config_get: invalid key '$key' (must match [A-Za-z_][A-Za-z0-9_]*)"
+    return 2
+  fi
   env_key="PRTEND_$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
   if [[ -n "${!env_key:-}" ]]; then
     printf '%s\n' "${!env_key}"
@@ -129,7 +144,7 @@ prtend_config_get() {
   if [[ -z "$path" || ! -f "$path" ]]; then
     return 0
   fi
-  value="$(grep -E "^${key}:" "$path" | head -n1 | sed -E "s/^${key}:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^['\"]//; s/['\"]$//")"
+  value="$(grep -E -- "^${key}:" "$path" | head -n1 | sed -E "s/^${key}:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^['\"]//; s/['\"]$//")"
   printf '%s\n' "$value"
 }
 
@@ -160,7 +175,7 @@ prtend_state_dir() {
 
 # Reads stdin, writes to <path> via tempfile + rename. Caller ensures parent dir exists.
 prtend_atomic_write() {
-  local path="$1" dir tmp
+  local path="${1:-}" dir tmp
   if [[ -z "$path" ]]; then
     prtend_log_error "prtend_atomic_write: missing path argument"
     return 2
@@ -169,17 +184,28 @@ prtend_atomic_write() {
   if [[ ! -d "$dir" ]]; then
     mkdir -p "$dir"
   fi
-  tmp="$(mktemp "${dir}/.prtend.XXXXXX")"
+  if ! tmp="$(mktemp "${dir}/.prtend.XXXXXX")"; then
+    prtend_log_error "prtend_atomic_write: mktemp failed in $dir"
+    return 1
+  fi
   if ! cat >"$tmp"; then
     rm -f "$tmp"
     return 1
   fi
-  mv -f "$tmp" "$path"
+  if ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    prtend_log_error "prtend_atomic_write: mv failed for $path"
+    return 1
+  fi
 }
 
 # -- json convenience ------------------------------------------------------
 
 prtend_json_get() {
-  local expr="$1"
-  jq -r "$expr"
+  local expr="${1:-}"
+  if [[ -z "$expr" ]]; then
+    prtend_log_error "prtend_json_get: missing jq expression"
+    return 2
+  fi
+  jq -r -- "$expr"
 }
