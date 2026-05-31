@@ -108,8 +108,14 @@ prtend_config_resolve() {
     return 0
   fi
 
-  xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
-  if slug="$(prtend_repo_slug 2>/dev/null)"; then
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    xdg="$XDG_CONFIG_HOME"
+  elif [[ -n "${HOME:-}" ]]; then
+    xdg="$HOME/.config"
+  else
+    xdg=""
+  fi
+  if [[ -n "$xdg" ]] && slug="$(prtend_repo_slug 2>/dev/null)"; then
     candidate="$xdg/prtend/${slug}.yml"
     if [[ -f "$candidate" ]]; then
       printf '%s\n' "$candidate"
@@ -169,8 +175,14 @@ prtend_state_dir() {
     printf '%s/.claude/prtend-state\n' "$repo_root"
     return 0
   fi
-  xdg_state="${XDG_STATE_HOME:-$HOME/.local/state}"
-  if slug="$(prtend_repo_slug 2>/dev/null)"; then
+  if [[ -n "${XDG_STATE_HOME:-}" ]]; then
+    xdg_state="$XDG_STATE_HOME"
+  elif [[ -n "${HOME:-}" ]]; then
+    xdg_state="$HOME/.local/state"
+  else
+    xdg_state=""
+  fi
+  if [[ -n "$xdg_state" ]] && slug="$(prtend_repo_slug 2>/dev/null)"; then
     printf '%s/prtend/%s\n' "$xdg_state" "$slug"
     return 0
   fi
