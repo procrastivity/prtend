@@ -67,33 +67,34 @@ prtend_log_error() {
 # -- repo identity ---------------------------------------------------------
 
 prtend_repo_slug() {
-  local url path repo owner
+  local url path
   if ! url="$(git remote get-url origin 2>/dev/null)"; then
     return 1
   fi
   url="${url%.git}"
 
-  # Reduce to an "<owner>/<repo>" intermediate regardless of remote URL form,
-  # then emit "<owner>-<repo>" so the slug is safe to use in filenames.
+  # Reduce to a "namespace/.../repo" path regardless of remote URL form, then
+  # emit it with "/" replaced by "-" so nested GitLab groups (and GitHub
+  # Enterprise nested orgs) don't collide on the leaf segment alone.
   if [[ "$url" == *"://"* ]]; then
     # Scheme URLs: https://host/owner/repo, http://..., ssh://git@host/owner/repo.
     path="${url#*://}"          # drop scheme
     path="${path#*@}"           # drop optional user@
     path="${path#*/}"           # drop host[:port]
   elif [[ "$url" == *:* ]]; then
-    # scp-like: git@host:owner/repo
+    # scp-like: git@host:owner/repo (or git@host:group/subgroup/repo)
     path="${url#*:}"
   else
     path="$url"
   fi
 
-  repo="${path##*/}"
-  path="${path%/"$repo"}"
-  owner="${path##*/}"
-  if [[ -z "$owner" || -z "$repo" ]]; then
+  # Strip leading/trailing slashes, require at least one "/" separator.
+  path="${path#/}"
+  path="${path%/}"
+  if [[ -z "$path" || "$path" != */* ]]; then
     return 1
   fi
-  printf '%s-%s\n' "$owner" "$repo"
+  printf '%s\n' "${path//\//-}"
 }
 
 # -- config ----------------------------------------------------------------
