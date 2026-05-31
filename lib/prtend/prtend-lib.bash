@@ -73,7 +73,8 @@ prtend_repo_slug() {
   fi
   url="${url%.git}"
 
-  # Normalize to a "<owner>/<repo>" path regardless of remote URL form.
+  # Reduce to an "<owner>/<repo>" intermediate regardless of remote URL form,
+  # then emit "<owner>-<repo>" so the slug is safe to use in filenames.
   if [[ "$url" == *"://"* ]]; then
     # Scheme URLs: https://host/owner/repo, http://..., ssh://git@host/owner/repo.
     path="${url#*://}"          # drop scheme
@@ -124,7 +125,8 @@ prtend_config_resolve() {
     fi
   fi
 
-  printf '\n'
+  # No config found — exit successfully with no output.
+  return 0
 }
 
 # Naive scalar lookup against the resolved YAML. Sufficient for v0 flat-scalar
