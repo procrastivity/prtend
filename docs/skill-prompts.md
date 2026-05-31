@@ -137,7 +137,7 @@ After Ask returns one of Reject / Accept / Ignore / Halt / Defer:
 
 - **Reject / Accept / Ignore**: as above.
 - **Halt**: `prtend note-post --kind halt --reason R`. Per-comment scope — keep processing other comments in the batch.
-- **Defer**: 
+- **Defer**:
   1. `prtend defer-write --pr N --comment C --reason R` → path P
   2. `prtend note-post --kind defer --doc P`
 
