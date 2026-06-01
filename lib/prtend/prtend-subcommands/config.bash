@@ -84,7 +84,15 @@ _prtend_config_validate_scalar() {
 # Split a comma-separated list value into one element per line on stdout.
 # Trims surrounding whitespace; rejects empty tokens with exit 2.
 _prtend_config_split_list() {
-  local context="$1" raw="$2" IFS=',' item
+  local context="$1" raw="$2" item
+  # Reject empty input, and leading/trailing/adjacent commas up front —
+  # bash word splitting drops trailing empty fields, so we can't rely on
+  # the loop below to catch `alice,` or `,alice`.
+  if [[ -z "$raw" || "$raw" == ,* || "$raw" == *, || "$raw" == *,,* ]]; then
+    prtend_log_error "$context: empty list element after split"
+    return 2
+  fi
+  local IFS=','
   for item in $raw; do
     item="${item#"${item%%[![:space:]]*}"}"
     item="${item%"${item##*[![:space:]]}"}"

@@ -491,6 +491,28 @@ case_set_list_empty_elem() {
 }
 
 # ----------------------------------------------------------------------------
+# Case 26b — set list with trailing / leading comma (Codex finding)
+# ----------------------------------------------------------------------------
+case_set_list_trailing_comma() {
+  echo "case: set list with trailing comma"
+  (
+    new_sandbox
+    cd "$SANDBOX" || return
+    mkdir -p "$XDG_ROOT/prtend"
+    cp "$FIXTURES/populated.yml" "$XDG_ROOT/prtend/foo-bar.yml"
+    err="$("$BIN" config set system_reviewers 'alice,' 2>&1 1>/dev/null)"
+    rc=$?
+    assert_eq "trailing-comma exit code" 2 "$rc"
+    assert_contains "trailing-comma stderr" "empty list element" "$err"
+    # Confirm the file was not mutated.
+    assert_eq "list unchanged after rejection" $'copilot\nduo' "$("$BIN" config get system_reviewers)"
+    err="$("$BIN" config set system_reviewers ',alice' 2>&1 1>/dev/null)"
+    rc=$?
+    assert_eq "leading-comma exit code" 2 "$rc"
+  )
+}
+
+# ----------------------------------------------------------------------------
 # Case 27 — set without active config
 # ----------------------------------------------------------------------------
 case_set_no_config() {
@@ -607,6 +629,7 @@ case_set_scalar_preserves
 case_set_bad_scalar
 case_set_list
 case_set_list_empty_elem
+case_set_list_trailing_comma
 case_set_no_config
 case_set_unknown_key
 case_path_active
