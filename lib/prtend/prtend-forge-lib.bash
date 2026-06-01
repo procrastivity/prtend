@@ -168,8 +168,18 @@ _prtend_forge_gl_cli_ready() {
 }
 
 prtend_forge_cli_ready() {
-  if ! prtend_forge_detect >/dev/null; then
-    return 3
+  local rc
+  prtend_forge_detect >/dev/null
+  rc=$?
+  if (( rc != 0 )); then
+    # Only the "couldn't detect a forge" case (exit 1) maps to the documented
+    # "CLI not installed" exit code (3). Other detect failures — e.g. an
+    # invalid PRTEND_FORGE override (exit 2) — propagate as-is so callers
+    # like `doctor` can distinguish "no forge here" from "user gave us junk".
+    if (( rc == 1 )); then
+      return 3
+    fi
+    return "$rc"
   fi
   prtend_forge_dispatch cli_ready
 }

@@ -70,7 +70,7 @@ Per `../forge-mapping.md` § "Authentication":
 - `_prtend_forge_gh_cli_ready`: `command -v gh >/dev/null || return 3`; then `gh auth status >/dev/null 2>&1`. Exit 0 if authed, 1 otherwise.
 - `_prtend_forge_gl_cli_ready`: `command -v glab >/dev/null || return 3`; then `glab auth status >/dev/null 2>&1`. Exit 0 if authed, 1 otherwise.
 
-`prtend_forge_cli_ready` calls `prtend_forge_detect` first (to populate `$PRTEND_FORGE`) then `prtend_forge_dispatch cli_ready`. If detection fails, return 3.
+`prtend_forge_cli_ready` calls `prtend_forge_detect` first (to populate `$PRTEND_FORGE`) then `prtend_forge_dispatch cli_ready`. If detect returns exit 1 ("no forge could be detected"), map to exit 3 ("CLI not installed") — that's the documented meaning for `doctor` callers. Other detect failures (notably exit 2 from an invalid `$PRTEND_FORGE` override) propagate as-is so `doctor` can distinguish "no forge here" from "user gave us junk".
 
 ### Key decisions
 
@@ -130,7 +130,7 @@ If a GitLab remote is available in another checkout, repeat the detection test t
 - [ ] `lib/prtend/prtend-forge-lib.bash` exists and defines `prtend_forge_detect`, `prtend_forge_cli_ready`, `prtend_forge_current_branch`, and `prtend_forge_dispatch` (plus the two `_prtend_forge_<gh|gl>_cli_ready` privates)
 - [ ] `bin/prtend` sources the new lib alongside `prtend-lib.bash`
 - [ ] `shellcheck` is clean on both lib files and the dispatcher
-- [ ] Detection probes both installed CLIs in parallel and decides among {gh only / glab only / both / neither} (upstream tracking branch as tiebreaker when both succeed), falls back to URL sniffing on `git remote get-url origin`, caches via `$PRTEND_FORGE`
+- [ ] Detection probes both installed CLIs and decides among {gh only / glab only / both / neither} (upstream tracking branch as tiebreaker when both succeed), falls back to URL sniffing on `git remote get-url origin`, caches via `$PRTEND_FORGE`
 - [ ] Readiness returns the documented 0/1/3 exit codes per forge
 - [ ] Lib sources without side effects under a minimal `PATH`
 - [ ] One commit on a feature branch: `feat(forge): add detection and readiness lib`
