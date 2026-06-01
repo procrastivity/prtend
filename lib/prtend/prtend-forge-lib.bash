@@ -804,6 +804,70 @@ _prtend_forge_gh_reviewer_add() {
 # additive across versions we read the current list, append (skipping
 # duplicates), and pass the combined list. See docs/forge-mapping.md
 # § "Add reviewer".
+# -- post_review_reply -----------------------------------------------------
+
+# Post a reply to a review comment. The body is read from stdin (not argv) so
+# multi-line bodies, embedded quotes, and shell metacharacters survive
+# unmangled. Echoes the new reply id (as a string) on stdout.
+prtend_forge_post_review_reply() {
+  prtend_forge_dispatch post_review_reply "$@"
+}
+
+_prtend_forge_gh_post_review_reply() {
+  local pr="${1:-}" comment_id="${2:-}" slug body out
+  if [[ -z "$pr" || ! "$pr" =~ ^[0-9]+$ ]]; then
+    prtend_log_error "post_review_reply: --pr must be a positive integer"; return 2
+  fi
+  if [[ -z "$comment_id" ]]; then
+    prtend_log_error "post_review_reply: missing comment-id argument"; return 2
+  fi
+  body="$(cat)"
+  if [[ -z "$body" ]]; then
+    prtend_log_error "post_review_reply: refusing to post empty body"; return 2
+  fi
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  if ! out="$(gh api -X POST "repos/${slug}/pulls/${pr}/comments/${comment_id}/replies" \
+        -f "body=${body}" --jq .id)"; then
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# GitLab can only append to a *discussion*, not directly to a note. The plain
+# note id surfaced by reviews-poll / review_comments isn't usable as a reply
+# target; we first look up the discussion that contains it. See
+# docs/forge-mapping.md § "What doesn't map cleanly" item 2.
+_prtend_forge_gl_post_review_reply() {
+  local pr="${1:-}" comment_id="${2:-}" project_id body discussion_id out
+  if [[ -z "$pr" || ! "$pr" =~ ^[0-9]+$ ]]; then
+    prtend_log_error "post_review_reply: --pr must be a positive integer"; return 2
+  fi
+  if [[ -z "$comment_id" ]]; then
+    prtend_log_error "post_review_reply: missing comment-id argument"; return 2
+  fi
+  body="$(cat)"
+  if [[ -z "$body" ]]; then
+    prtend_log_error "post_review_reply: refusing to post empty body"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  discussion_id="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate \
+    | jq -rs --arg cid "$comment_id" '
+        add // []
+        | [ .[] | select(any(.notes[]?; (.id | tostring) == $cid)) | .id ]
+        | first // empty')" || return $?
+  if [[ -z "$discussion_id" ]]; then
+    printf 'post_review_reply: no discussion contains note %s on MR %s\n' \
+      "$comment_id" "$pr" >&2
+    return 1
+  fi
+  if ! out="$(glab api -X POST \
+        "projects/${project_id}/merge_requests/${pr}/discussions/${discussion_id}/notes" \
+        -f "body=${body}" --jq .id)"; then
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
 _prtend_forge_gl_reviewer_add() {
   local pr="${1:-}" login="${2:-}" mr_json existing combined err err_file rc=0
   if [[ -z "$pr" || -z "$login" ]]; then
