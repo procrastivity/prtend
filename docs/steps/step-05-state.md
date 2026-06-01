@@ -45,15 +45,19 @@ Mirror the structure of `prtend-lib.bash` and (when step 03 lands it) `prtend-fo
 if [[ -n "${PRTEND_STATE_LIB_LOADED:-}" ]]; then
   return 0
 fi
-PRTEND_STATE_LIB_LOADED=1
 
-set -euo pipefail
-
-# Depends on prtend-lib.bash being sourced first (atomic_write, state_dir, log_*).
+# Dep check BEFORE both `set -e` and the load guard. `set -euo pipefail`
+# leaks into the caller — if it ran before `return 1`, errexit would kill
+# the parent shell instead of letting it source prtend-lib.bash and retry.
+# And setting the load guard before the dep check would poison it: a later
+# correctly-ordered source would silently return without defining anything.
 if [[ -z "${PRTEND_LIB_LOADED:-}" ]]; then
   printf 'error: prtend-state-lib.bash requires prtend-lib.bash to be sourced first\n' >&2
   return 1
 fi
+
+set -euo pipefail
+PRTEND_STATE_LIB_LOADED=1
 ```
 
 The dispatcher already sources `prtend-lib.bash` before any other lib, so the guard is a belt-and-braces check for ad-hoc `bash -c 'source ...'` callers. Match the guard idiom from `prtend-forge-lib.bash` — same wording, same exit path.
@@ -89,6 +93,13 @@ prtend_state_path() {
     prtend_log_error "prtend_state_path: missing pr argument"
     return 2
   fi
+  # Reject path separators and traversal — pr is an opaque slug for the
+  # filename, never a path fragment. Stops `prtend_state_clear ../other`
+  # from escaping the per-PR state directory.
+  if [[ "$pr" == */* || "$pr" == *\\* || "$pr" == "." || "$pr" == ".." || "$pr" == *..* ]]; then
+    prtend_log_error "prtend_state_path: pr must not contain path separators or traversal (got '$pr')"
+    return 2
+  fi
   local dir
   dir="$(prtend_state_dir)" || return 1
   printf '%s/%s.json\n' "$dir" "$pr"
@@ -97,7 +108,7 @@ prtend_state_path() {
 
 `prtend_state_dir` already exists in `prtend-lib.bash` — do not reimplement directory resolution here. If it fails (no git, no XDG, no HOME), propagate the failure.
 
-PR argument validation: require non-empty. Don't enforce numeric — GitHub/GitLab PR identifiers are integers in practice, but the lib treats `<pr>` as an opaque slug for the filename. Bad input shows up as a missing file, not a crash.
+PR argument validation: require non-empty and reject path separators / `..` traversal. Don't enforce numeric — GitHub/GitLab PR identifiers are integers in practice, but the lib treats `<pr>` as an opaque slug for the filename. The traversal check matters because `state_path`'s result is fed straight into `prtend_atomic_write` and `rm -f`; without it, `prtend_state_clear ../other` would escape the per-PR state directory. Bad input that passes the traversal check (e.g. an unexpected suffix) still just shows up as a missing file, not a crash.
 
 #### `prtend_state_read <pr>`
 
@@ -105,7 +116,7 @@ PR argument validation: require non-empty. Don't enforce numeric — GitHub/GitL
 prtend_state_read() {
   local pr="${1:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "prtend_state_read: missing pr"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ ! -f "$path" ]]; then
     return 0   # absent → empty stdout, success
   fi
@@ -126,7 +137,7 @@ prtend_state_write() {
     prtend_log_error "prtend_state_write: input is not valid JSON"
     return 2
   fi
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   printf '%s\n' "$json" | prtend_atomic_write "$path"
 }
 ```
@@ -182,7 +193,7 @@ prtend_state_increment_ci_attempt() {
   [[ -n "$sig" ]] || { prtend_log_error "increment_ci_attempt: missing signature"; return 2; }
   [[ "$pr" =~ ^[0-9]+$ ]] || { prtend_log_error "increment_ci_attempt: pr must be numeric (got '$pr')"; return 2; }
 
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ -f "$path" ]]; then
     existing="$(cat -- "$path")"
   else
@@ -215,7 +226,7 @@ prtend_state_ci_attempts() {
   local pr="${1:-}" sig="${2:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "ci_attempts: missing pr"; return 2; }
   [[ -n "$sig" ]] || { prtend_log_error "ci_attempts: missing signature"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ ! -f "$path" ]]; then
     printf '0\n'
     return 0
@@ -235,7 +246,7 @@ prtend_state_set_cursor() {
   [[ "$pr" =~ ^[0-9]+$ ]] || { prtend_log_error "set_cursor: pr must be numeric (got '$pr')"; return 2; }
   # cursor MAY be empty — that's "reset to first-poll".
 
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ -f "$path" ]]; then
     existing="$(cat -- "$path")"
   else
@@ -259,7 +270,7 @@ Empty cursor is allowed — sets `.last_review_cursor` to `""`. The reviews-poll
 prtend_state_get_cursor() {
   local pr="${1:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "get_cursor: missing pr"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ ! -f "$path" ]]; then
     return 0   # empty stdout, success
   fi
@@ -275,7 +286,7 @@ Empty stdout = "no cursor yet, treat as first poll". Distinguishing missing-file
 prtend_state_clear() {
   local pr="${1:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "clear: missing pr"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   rm -f -- "$path"
 }
 ```

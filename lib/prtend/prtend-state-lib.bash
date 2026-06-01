@@ -5,15 +5,18 @@
 if [[ -n "${PRTEND_STATE_LIB_LOADED:-}" ]]; then
   return 0
 fi
-PRTEND_STATE_LIB_LOADED=1
-
-set -euo pipefail
 
 # Depends on prtend-lib.bash being sourced first (atomic_write, state_dir, log_*).
+# Check BEFORE both `set -e` and the load guard: `set -e` would leak into the
+# caller and kill the parent shell on `return 1`, and a poisoned load guard
+# would silently skip definitions on a later retry.
 if [[ -z "${PRTEND_LIB_LOADED:-}" ]]; then
   printf 'error: prtend-state-lib.bash requires prtend-lib.bash to be sourced first\n' >&2
   return 1
 fi
+
+set -euo pipefail
+PRTEND_STATE_LIB_LOADED=1
 
 # -- private helpers -------------------------------------------------------
 
@@ -44,6 +47,13 @@ prtend_state_path() {
     prtend_log_error "prtend_state_path: missing pr argument"
     return 2
   fi
+  # Reject path separators and traversal — pr is an opaque slug for the
+  # filename, never a path fragment. Stops `prtend_state_clear ../other`
+  # from escaping the per-PR state directory.
+  if [[ "$pr" == */* || "$pr" == *\\* || "$pr" == "." || "$pr" == ".." || "$pr" == *..* ]]; then
+    prtend_log_error "prtend_state_path: pr must not contain path separators or traversal (got '$pr')"
+    return 2
+  fi
   local dir
   dir="$(prtend_state_dir)" || return 1
   printf '%s/%s.json\n' "$dir" "$pr"
@@ -52,7 +62,7 @@ prtend_state_path() {
 prtend_state_read() {
   local pr="${1:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "prtend_state_read: missing pr"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ ! -f "$path" ]]; then
     return 0
   fi
@@ -67,7 +77,7 @@ prtend_state_write() {
     prtend_log_error "prtend_state_write: input is not valid JSON"
     return 2
   fi
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   printf '%s\n' "$json" | prtend_atomic_write "$path"
 }
 
@@ -77,7 +87,7 @@ prtend_state_increment_ci_attempt() {
   [[ -n "$sig" ]] || { prtend_log_error "increment_ci_attempt: missing signature"; return 2; }
   [[ "$pr" =~ ^[0-9]+$ ]] || { prtend_log_error "increment_ci_attempt: pr must be numeric (got '$pr')"; return 2; }
 
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ -f "$path" ]]; then
     existing="$(cat -- "$path")"
   else
@@ -99,7 +109,7 @@ prtend_state_ci_attempts() {
   local pr="${1:-}" sig="${2:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "ci_attempts: missing pr"; return 2; }
   [[ -n "$sig" ]] || { prtend_log_error "ci_attempts: missing signature"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ ! -f "$path" ]]; then
     printf '0\n'
     return 0
@@ -112,7 +122,7 @@ prtend_state_set_cursor() {
   [[ -n "$pr" ]] || { prtend_log_error "set_cursor: missing pr"; return 2; }
   [[ "$pr" =~ ^[0-9]+$ ]] || { prtend_log_error "set_cursor: pr must be numeric (got '$pr')"; return 2; }
 
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ -f "$path" ]]; then
     existing="$(cat -- "$path")"
   else
@@ -130,7 +140,7 @@ prtend_state_set_cursor() {
 prtend_state_get_cursor() {
   local pr="${1:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "get_cursor: missing pr"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   if [[ ! -f "$path" ]]; then
     return 0
   fi
@@ -140,6 +150,6 @@ prtend_state_get_cursor() {
 prtend_state_clear() {
   local pr="${1:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "clear: missing pr"; return 2; }
-  path="$(prtend_state_path "$pr")" || return 1
+  path="$(prtend_state_path "$pr")" || return $?
   rm -f -- "$path"
 }
