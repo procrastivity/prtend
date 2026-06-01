@@ -206,14 +206,20 @@ _prtend_forge_gl_project_id() {
 }
 
 # Convert an ISO-8601 timestamp to epoch seconds. Tries GNU `date -d` first,
-# falls back to BSD `date -j -f`. Echoes the epoch on stdout, exit 0 on
-# success, exit 1 if neither form parses.
+# falls back to BSD `date -j -f`. GitLab timestamps routinely include
+# fractional seconds (e.g. `...03.176Z`); BSD `date` can't parse those, so
+# strip the fractional portion before the BSD form. Echoes the epoch on
+# stdout, exit 0 on success, exit 1 if neither form parses.
 _prtend_iso_to_epoch() {
-  local ts="$1" out
+  local ts="$1" out clean
   if out="$(date -u -d "$ts" +%s 2>/dev/null)"; then
     printf '%s\n' "$out"; return 0
   fi
-  if out="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null)"; then
+  case "$ts" in
+    *.[0-9]*Z) clean="${ts%.*}Z" ;;
+    *)         clean="$ts" ;;
+  esac
+  if out="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$clean" +%s 2>/dev/null)"; then
     printf '%s\n' "$out"; return 0
   fi
   return 1

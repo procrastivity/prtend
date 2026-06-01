@@ -73,7 +73,7 @@ Emit a single-line JSON object `{"state":"open"}` etc.
 
 Per `../forge-mapping.md` § "CI status snapshot":
 
-- `_prtend_forge_gh_ci_status <pr>`: `gh pr checks "$pr" --json name,state,conclusion,link` → jq transform. Aggregate state: `failure` if any check failed, else `running` if any running, else `pending` if none started, else `success`. Per-check shape: `{name, state, conclusion, url}` (rename `link`→`url`).
+- `_prtend_forge_gh_ci_status <pr>`: `gh pr checks "$pr" --json name,state,bucket,link` → jq transform. `gh pr checks` exposes the bucketed outcome via `bucket` (`pass`/`fail`/`pending`/`skipping`/`cancel`), not a separate `conclusion` field — map bucket → canonical conclusion (`success`/`failure`/`pending`/`skipped`/`cancelled`). Aggregate state: `failure` if any check failed, else `running` if any pending, else `cancelled` if every check is cancelled, else `pending` if there are no checks, else `success`. Per-check shape: `{name, state, conclusion, url}` (rename `link`→`url`).
 - `_prtend_forge_gl_ci_status <pr>`: two-step — `glab mr view "$pr" --output json` to resolve `head_pipeline.id`, then `glab ci status --pipeline <id> --output json`. Map pipeline `status` directly: `failed`→`failure`, `success`→`success`, `running`→`running`, `pending`→`pending`, `canceled`→`cancelled`. Per-job shape: `{name, state, conclusion, url}`.
 
 Both privates emit the canonical shape from `../forge-mapping.md`:

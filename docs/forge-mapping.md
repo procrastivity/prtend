@@ -16,7 +16,7 @@ Commands shown are accurate as of the doc date but may shift with new CLI releas
 | PR | Pull Request | Merge Request | Identified by integer number, scoped to the repo. |
 | PR identifier in API | `<owner>/<repo>` + number | project ID or path + IID | GitLab uses *internal ID* (IID) for the project-scoped number; the global ID is different. Use IID throughout — it's what `glab` accepts. |
 | PR state | `OPEN`, `CLOSED`, `MERGED` (+ separate `isDraft` bool) | `opened`, `closed`, `merged`, `locked` (+ `draft` bool, or `Draft:` title prefix on older GitLab) | prtend normalizes to `open` / `closed` / `merged` / `draft`. |
-| Draft | `--draft` flag on create; `isDraft: true` in JSON | `--draft` flag on newer `glab`; otherwise `Draft:` title prefix | Title prefix is the durable convention; `glab` may toggle the prefix even when the flag is used. |
+| Draft | `--draft` flag on create; `isDraft: true` in JSON | `--draft` flag; `draft: true` boolean in JSON | prtend honors the `draft` boolean only; we do not parse legacy `Draft:` title prefixes. |
 | Reviewer | First-class concept; `reviewRequests` array | First-class concept; `reviewers` array | Approvers (GitLab) are a separate concept tied to approval rules; prtend does not use them. |
 | Review batch | Submitted review (`gh pr review`) — a set of comments delivered together with a final state of `APPROVED` / `CHANGES_REQUESTED` / `COMMENTED` | Discussion / thread of notes; "settled" when all notes are present and no new ones arrive within the poll window | The granularity differs. See **Reviews / discussions** below. |
 | Review comment | Inline comment on a diff position, part of a review | Inline note on a diff position, part of a discussion | Both forges allow non-inline comments too; prtend treats those identically. |
@@ -99,7 +99,7 @@ Canonical output:
 Normalization:
 
 - GitHub: `state == "OPEN" && isDraft` → `draft`; `state == "OPEN"` → `open`; `state == "MERGED"` → `merged`; `state == "CLOSED"` → `closed`
-- GitLab: `state == "opened" && draft` → `draft`; `state == "opened"` → `open`; `state == "merged"` → `merged`; `state == "closed"` → `closed`. Locked state is reported as `closed` for prtend's purposes.
+- GitLab: `state == "opened" && draft` → `draft`; `state == "opened"` → `open`; `state == "merged"` → `merged`; `state == "closed"` → `closed`. Locked state is reported as `closed` for prtend's purposes. The legacy `Draft:` title-prefix convention is not honored; only the `draft` boolean.
 
 ### Push branch
 
@@ -123,7 +123,7 @@ Notes:
 - Both CLIs print the PR/MR URL to stdout on success; parse out the trailing number.
 - `glab mr create` defaults `--target-branch` to the project's default branch; same as `gh pr create`. Pass `--target` / `--target-branch` explicitly only when the target differs.
 - Title and body come from the caller. prtend does not compose them.
-- For draft: GitHub's `--draft` is durable; on GitLab, the `--draft` flag may or may not be supported depending on the `glab` version. Fall back to prepending `Draft: ` to the title.
+- For draft: GitHub's `--draft` is durable; on GitLab, pass `--draft` and rely on the `draft` boolean in the JSON view. prtend does not parse the legacy `Draft:` title-prefix convention.
 
 ### Add reviewer
 
