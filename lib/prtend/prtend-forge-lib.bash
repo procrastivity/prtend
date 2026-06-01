@@ -168,9 +168,11 @@ _prtend_forge_gl_cli_ready() {
 }
 
 prtend_forge_cli_ready() {
-  local rc
-  prtend_forge_detect >/dev/null
-  rc=$?
+  # `set -e` would abort on a bare non-zero `prtend_forge_detect` call before
+  # `rc=$?` could capture; wrapping with `|| rc=$?` neutralises that so the
+  # mapping below actually runs.
+  local rc=0
+  prtend_forge_detect >/dev/null || rc=$?
   if (( rc != 0 )); then
     # Only the "couldn't detect a forge" case (exit 1) maps to the documented
     # "CLI not installed" exit code (3). Other detect failures — e.g. an
