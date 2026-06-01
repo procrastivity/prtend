@@ -653,6 +653,63 @@ _prtend_forge_gl_comment_body() {
   glab api "projects/${project_id}/merge_requests/${pr}/notes/${comment_id}" --jq .body
 }
 
+# -- review_thread_bodies --------------------------------------------------
+
+# Concatenated bodies of every comment/note in the thread containing
+# <comment_id>. Used by note-post to detect a prior prtend reply — the
+# marker lives in the *reply* we post, not in the reviewer's original
+# comment, so checking only the original body misses the handled case.
+#
+# Exit 0 + bodies joined by newlines on hit, exit 1 + empty if the comment
+# id is unknown on this PR/MR.
+prtend_forge_review_thread_bodies() {
+  prtend_forge_dispatch review_thread_bodies "$@"
+}
+
+# GitHub review-comment replies are flat: every reply in a thread shares the
+# same `in_reply_to_id` (the root). The root itself has no `in_reply_to_id`.
+# We list all review comments on the PR, identify the thread root for
+# <comment_id> (it might be the root or a reply), and concat every body
+# whose id == root or whose in_reply_to_id == root.
+_prtend_forge_gh_review_thread_bodies() {
+  local pr="${1:-}" comment_id="${2:-}" slug all
+  if [[ -z "$pr" || -z "$comment_id" ]]; then
+    prtend_log_error "review_thread_bodies: missing pr or comment-id argument"; return 2
+  fi
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  all="$(gh api "repos/${slug}/pulls/${pr}/comments" --paginate | jq -s 'add // []')" || return $?
+  if [[ "$(printf '%s' "$all" | jq --arg cid "$comment_id" \
+        '[.[] | select((.id|tostring) == $cid)] | length')" == "0" ]]; then
+    return 1
+  fi
+  printf '%s' "$all" | jq -r --arg cid "$comment_id" '
+    (map(select((.id|tostring) == $cid))[0]) as $target
+    | (($target.in_reply_to_id // $target.id) | tostring) as $root
+    | [ .[]
+        | select((.id|tostring) == $root or ((.in_reply_to_id // "") | tostring) == $root)
+        | (.body // "") ]
+    | join("\n")'
+}
+
+# GitLab: the discussion containing <comment_id> holds every note in the
+# thread; concat their bodies.
+_prtend_forge_gl_review_thread_bodies() {
+  local pr="${1:-}" comment_id="${2:-}" project_id discussion
+  if [[ -z "$pr" || -z "$comment_id" ]]; then
+    prtend_log_error "review_thread_bodies: missing pr or comment-id argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  discussion="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate \
+    | jq -s --arg cid "$comment_id" '
+        add // []
+        | map(select(any(.notes[]?; (.id|tostring) == $cid)))
+        | first // null')" || return $?
+  if [[ -z "$discussion" || "$discussion" == "null" ]]; then
+    return 1
+  fi
+  printf '%s' "$discussion" | jq -r '[.notes[]? | (.body // "")] | join("\n")'
+}
+
 # -- pr_create -------------------------------------------------------------
 
 prtend_forge_pr_create() {
@@ -804,6 +861,70 @@ _prtend_forge_gh_reviewer_add() {
 # additive across versions we read the current list, append (skipping
 # duplicates), and pass the combined list. See docs/forge-mapping.md
 # § "Add reviewer".
+# -- post_review_reply -----------------------------------------------------
+
+# Post a reply to a review comment. The body is read from stdin (not argv) so
+# multi-line bodies, embedded quotes, and shell metacharacters survive
+# unmangled. Echoes the new reply id (as a string) on stdout.
+prtend_forge_post_review_reply() {
+  prtend_forge_dispatch post_review_reply "$@"
+}
+
+_prtend_forge_gh_post_review_reply() {
+  local pr="${1:-}" comment_id="${2:-}" slug body out
+  if [[ -z "$pr" || ! "$pr" =~ ^[0-9]+$ ]]; then
+    prtend_log_error "post_review_reply: --pr must be a positive integer"; return 2
+  fi
+  if [[ -z "$comment_id" ]]; then
+    prtend_log_error "post_review_reply: missing comment-id argument"; return 2
+  fi
+  body="$(cat)"
+  if [[ -z "$body" ]]; then
+    prtend_log_error "post_review_reply: refusing to post empty body"; return 2
+  fi
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  if ! out="$(gh api -X POST "repos/${slug}/pulls/${pr}/comments/${comment_id}/replies" \
+        -f "body=${body}" --jq .id)"; then
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# GitLab can only append to a *discussion*, not directly to a note. The plain
+# note id surfaced by reviews-poll / review_comments isn't usable as a reply
+# target; we first look up the discussion that contains it. See
+# docs/forge-mapping.md § "What doesn't map cleanly" item 2.
+_prtend_forge_gl_post_review_reply() {
+  local pr="${1:-}" comment_id="${2:-}" project_id body discussion_id out
+  if [[ -z "$pr" || ! "$pr" =~ ^[0-9]+$ ]]; then
+    prtend_log_error "post_review_reply: --pr must be a positive integer"; return 2
+  fi
+  if [[ -z "$comment_id" ]]; then
+    prtend_log_error "post_review_reply: missing comment-id argument"; return 2
+  fi
+  body="$(cat)"
+  if [[ -z "$body" ]]; then
+    prtend_log_error "post_review_reply: refusing to post empty body"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  discussion_id="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate \
+    | jq -rs --arg cid "$comment_id" '
+        add // []
+        | [ .[] | select(any(.notes[]?; (.id | tostring) == $cid)) | .id ]
+        | first // empty')" || return $?
+  if [[ -z "$discussion_id" ]]; then
+    printf 'post_review_reply: no discussion contains note %s on MR %s\n' \
+      "$comment_id" "$pr" >&2
+    return 1
+  fi
+  if ! out="$(glab api -X POST \
+        "projects/${project_id}/merge_requests/${pr}/discussions/${discussion_id}/notes" \
+        -f "body=${body}" --jq .id)"; then
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
 _prtend_forge_gl_reviewer_add() {
   local pr="${1:-}" login="${2:-}" mr_json existing combined err err_file rc=0
   if [[ -z "$pr" || -z "$login" ]]; then
