@@ -130,7 +130,7 @@ If a GitLab remote is available in another checkout, repeat the detection test t
 - [ ] `lib/prtend/prtend-forge-lib.bash` exists and defines `prtend_forge_detect`, `prtend_forge_cli_ready`, `prtend_forge_current_branch`, and `prtend_forge_dispatch` (plus the two `_prtend_forge_<gh|gl>_cli_ready` privates)
 - [ ] `bin/prtend` sources the new lib alongside `prtend-lib.bash`
 - [ ] `shellcheck` is clean on both lib files and the dispatcher
-- [ ] Detection probes `gh` then `glab`, falls back to URL sniffing, caches via `$PRTEND_FORGE`
+- [ ] Detection probes both installed CLIs in parallel and decides among {gh only / glab only / both / neither} (upstream tracking branch as tiebreaker when both succeed), falls back to URL sniffing on `git remote get-url origin`, caches via `$PRTEND_FORGE`
 - [ ] Readiness returns the documented 0/1/3 exit codes per forge
 - [ ] Lib sources without side effects under a minimal `PATH`
 - [ ] One commit on a feature branch: `feat(forge): add detection and readiness lib`
