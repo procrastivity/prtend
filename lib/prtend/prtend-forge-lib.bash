@@ -335,9 +335,10 @@ _prtend_forge_gh_ci_status() {
     };
     (map(per_check)) as $cs
     | { state: (
-          if   any($cs[]; .conclusion == "failure") then "failure"
-          elif any($cs[]; .conclusion == "pending") then "running"
-          elif ($cs | length) == 0                  then "pending"
+          if   any($cs[]; .conclusion == "failure")   then "failure"
+          elif any($cs[]; .conclusion == "pending")   then "running"
+          elif ($cs | length) == 0                    then "pending"
+          elif all($cs[]; .conclusion == "cancelled") then "cancelled"
           else "success" end),
         checks: $cs }'
 }
@@ -393,7 +394,10 @@ _prtend_forge_gh_reviews_since() {
   fi
   [[ -z "$cursor" ]] && cursor=0
   slug="$(_prtend_forge_gh_repo_slug)" || return $?
-  reviews_json="$(gh api "repos/${slug}/pulls/${pr}/reviews" --paginate)" || return $?
+  # `gh api --paginate` on a JSON-array endpoint usually merges pages, but
+  # older versions and some endpoints emit one concatenated array per page.
+  # Defensively slurp+flatten so the downstream jq filter sees one array.
+  reviews_json="$(gh api "repos/${slug}/pulls/${pr}/reviews" --paginate | jq -s 'add // []')" || return $?
 
   filtered="$(printf '%s' "$reviews_json" | jq -c --argjson cur "$cursor" '
     [ .[] | select(.id > $cur) ] | sort_by(.submitted_at)')"
@@ -409,9 +413,8 @@ _prtend_forge_gh_reviews_since() {
       | if . == \"changes_requested\" then \"changes_requested\"
         elif . == \"approved\" then \"approved\"
         else \"commented\" end")"
-    if ! comments_json="$(gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate 2>/dev/null)"; then
-      comments_json='[]'
-    fi
+    # Propagate per-review comments errors; spec says don't swallow forge failures.
+    comments_json="$(gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate | jq -s 'add // []')" || return $?
     comment_ids="$(printf '%s' "$comments_json" | jq '[ .[] | (.id | tostring) ]')"
     batch="$(jq -nc \
       --arg id "$review_id" --arg sa "$submitted_at" \
@@ -459,11 +462,16 @@ _prtend_forge_gl_reviews_since() {
 
   discussions_json="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate)" || return $?
 
-  filtered="$(printf '%s' "$discussions_json" | jq -c \
+  # GitLab timestamps include fractional seconds (e.g. `...46.176Z`), which
+  # jq's `fromdateiso8601` rejects in jq 1.6. Strip the fractional portion
+  # before parsing. Sort by max-note time (the settling time) per spec —
+  # `submitted_at` is the earliest note and isn't a stable batch order key.
+  filtered="$(printf '%s' "$discussions_json" | jq -s 'add // []' | jq -c \
     --argjson cur "$cursor_epoch" --argjson now "$now" --argjson qw "$quiet_window" '
+    def to_epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
     [ .[]
       | . as $d
-      | ([ .notes[]? | select((.system // false) | not) | (.created_at | fromdateiso8601) ]) as $times
+      | ([ .notes[]? | select((.system // false) | not) | (.created_at | to_epoch) ]) as $times
       | select(($times | length) > 0)
       | select(all($times[]; . > $cur))
       | select(($times | max) <= ($now - $qw))
@@ -475,7 +483,7 @@ _prtend_forge_gl_reviews_since() {
           comment_ids:  [ .notes[]? | select((.system // false) | not) | (.id | tostring) ],
           _max_t:       ($times | max)
         }
-    ] | sort_by(.submitted_at)')"
+    ] | sort_by(._max_t)')"
 
   batches="$(printf '%s' "$filtered" | jq -c '[ .[] | del(._max_t) ]')"
   next_cursor="$(printf '%s' "$filtered" | jq -r --arg fb "$cursor" '
@@ -500,16 +508,19 @@ _prtend_forge_gh_review_comments() {
     prtend_log_error "review_comments: missing pr or review-id argument"; return 2
   fi
   slug="$(_prtend_forge_gh_repo_slug)" || return $?
-  gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate | jq -c '
-    { comments: [ .[] | {
-        comment_id:   (.id | tostring),
-        author:       (.user.login // ""),
-        body:         (.body // ""),
-        path:         (.path // ""),
-        line:         (.line // .original_line // .start_line // null),
-        anchor_stale: false,
-        created_at:   (.created_at // "")
-      } ] }'
+  # Slurp+flatten so multi-page responses still produce one canonical object.
+  gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate \
+    | jq -s 'add // []' \
+    | jq -c '
+        { comments: [ .[] | {
+            comment_id:   (.id | tostring),
+            author:       (.user.login // ""),
+            body:         (.body // ""),
+            path:         (.path // ""),
+            line:         (.line // .original_line // .start_line // null),
+            anchor_stale: false,
+            created_at:   (.created_at // "")
+          } ] }'
 }
 
 _prtend_forge_gl_review_comments() {
