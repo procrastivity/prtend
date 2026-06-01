@@ -91,8 +91,16 @@ _prtend_forge_from_upstream() {
 
 prtend_forge_detect() {
   if [[ -n "${PRTEND_FORGE:-}" ]]; then
-    printf '%s\n' "$PRTEND_FORGE"
-    return 0
+    case "$PRTEND_FORGE" in
+      github|gitlab)
+        printf '%s\n' "$PRTEND_FORGE"
+        return 0
+        ;;
+      *)
+        prtend_log_error "prtend_forge_detect: invalid PRTEND_FORGE='$PRTEND_FORGE' (expected 'github' or 'gitlab')"
+        return 2
+        ;;
+    esac
   fi
 
   local gh_ok=0 gl_ok=0 hint

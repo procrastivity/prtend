@@ -51,15 +51,17 @@ Wire `prtend_forge_cli_ready` through `prtend_forge_dispatch cli_ready` so the p
 
 Per `../forge-mapping.md` § "Detect forge from repo":
 
-1. If `$PRTEND_FORGE` is already set and non-empty, echo it and return 0 (cache hit).
-2. Try `gh repo view --json url >/dev/null 2>&1`. On exit 0, set `PRTEND_FORGE=github` and return.
-3. Else try `glab repo view --output json >/dev/null 2>&1`. On exit 0, set `PRTEND_FORGE=gitlab` and return.
-4. Else fall back to URL sniffing on `git remote get-url origin` — `github.com` / GHE hostnames → `github`; `gitlab.com` / self-hosted GitLab hostnames → `gitlab`. This covers the "CLI not installed but we still want a hint" case.
+1. If `$PRTEND_FORGE` is already set, validate it: `github` or `gitlab` → echo and return 0 (cache hit); any other value → log error and return 2 (rejecting a malformed override is better than silently passing junk to `prtend_forge_dispatch`).
+2. Probe both CLIs that are installed: `gh repo view --json url >/dev/null 2>&1` and `glab repo view --output json >/dev/null 2>&1`. Record which succeeded.
+3. Decide based on which probes succeeded:
+   - Only `gh` succeeded → `PRTEND_FORGE=github`.
+   - Only `glab` succeeded → `PRTEND_FORGE=gitlab`.
+   - Both succeeded (a repo with a GitHub origin and a GitLab mirror, or vice versa) → prefer the remote pointed at by the upstream tracking branch (`git rev-parse --abbrev-ref --symbolic-full-name @{u}` → take its remote prefix → resolve via `git remote get-url <remote>` → sniff host). If no upstream is configured, fall back to `github` (matches the order of the probe).
+   - Neither succeeded → fall through.
+4. Fallback: URL sniff `git remote get-url origin` — `github.com` / GHE hostnames → `github`; `gitlab.com` / self-hosted GitLab hostnames → `gitlab`. This covers the "CLI not installed but we still want a hint" case so `doctor` can complain coherently.
 5. If nothing matches, echo nothing, return 1.
 
 The cache check at step 1 is what makes the dispatcher's lifetime caching work — every call after the first is free.
-
-For the "both `gh` and `glab` succeed" case (a repo with both GitHub origin and a GitLab mirror), prefer the remote pointed at by the upstream tracking branch (`git rev-parse --abbrev-ref --symbolic-full-name @{u}` → take its remote prefix → resolve via `git remote get-url <remote>` → sniff host). If no upstream is configured, prefer `github` (matches the order of the probe).
 
 ### Readiness algorithm
 
