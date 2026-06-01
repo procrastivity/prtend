@@ -95,7 +95,10 @@ prtend_cmd_pr_open() {
     return 1
   fi
 
-  # 4. Existing-PR probe.
+  # 4. Existing-PR probe. `pr_for_branch` is open-only; when it reports no
+  #    open PR we also check for closed/merged PRs on the same branch via
+  #    `pr_last_for_branch` so we refuse instead of silently creating a
+  #    duplicate.
   local pr="" pr_existed_open=0
   rc=0
   pr="$(prtend_forge_pr_for_branch "$branch" 2>/dev/null)" || rc=$?
@@ -120,7 +123,26 @@ prtend_cmd_pr_open() {
         prtend_log_error "pr-open: unexpected pr_state '$state' for #$pr"
         return 1 ;;
     esac
-  elif (( rc != 1 )); then
+  elif (( rc == 1 )); then
+    # No open PR. Check whether a closed or merged PR exists for the branch.
+    local last_pr="" lrc=0
+    last_pr="$(prtend_forge_pr_last_for_branch "$branch" 2>/dev/null)" || lrc=$?
+    if (( lrc == 0 )) && [[ -n "$last_pr" ]]; then
+      local last_state_json last_state
+      if ! last_state_json="$(prtend_forge_pr_state "$last_pr")"; then
+        prtend_log_error "pr-open: forge call failed resolving pr_state for #$last_pr"
+        return 3
+      fi
+      last_state="$(printf '%s' "$last_state_json" | jq -r '.state')"
+      case "$last_state" in
+        closed|merged)
+          printf "prtend: branch '%s' has a closed/merged PR (#%s); user must decide reopen/new/abort\n" \
+            "$branch" "$last_pr" >&2
+          return 4 ;;
+        *) ;;  # open/draft would mean a race with the open probe; let creation path run.
+      esac
+    fi
+  else
     return "$rc"
   fi
 

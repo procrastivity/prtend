@@ -307,6 +307,40 @@ _prtend_forge_gl_pr_for_branch() {
   printf '%s\n' "$filtered" | jq -r '.[0].iid'
 }
 
+# -- pr_last_for_branch ----------------------------------------------------
+
+# Most recent PR for the branch regardless of state (open / closed / merged).
+# Exit 0 + number on hit, exit 1 + empty when the branch has never had a PR.
+# Used by `pr-open` to detect "branch already has a closed/merged PR" — the
+# open-only `pr_for_branch` misses that case and would let pr-open silently
+# create a duplicate.
+prtend_forge_pr_last_for_branch() {
+  prtend_forge_dispatch pr_last_for_branch "$@"
+}
+
+_prtend_forge_gh_pr_last_for_branch() {
+  local branch="${1:-}" out
+  if [[ -z "$branch" ]]; then
+    prtend_log_error "pr_last_for_branch: missing branch argument"; return 2
+  fi
+  out="$(gh pr list --head "$branch" --state all --json number,createdAt)" || return $?
+  if [[ "$(printf '%s' "$out" | jq 'length')" == 0 ]]; then return 1; fi
+  printf '%s' "$out" | jq -r 'sort_by(.createdAt) | last | .number'
+}
+
+_prtend_forge_gl_pr_last_for_branch() {
+  local branch="${1:-}" project_id out filtered
+  if [[ -z "$branch" ]]; then
+    prtend_log_error "pr_last_for_branch: missing branch argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  out="$(glab mr list --source-branch "$branch" --state all --output json)" || return $?
+  filtered="$(printf '%s' "$out" | jq --argjson pid "$project_id" \
+    '[ .[] | select(.target_project_id == $pid) ]')"
+  if [[ "$(printf '%s' "$filtered" | jq 'length')" == 0 ]]; then return 1; fi
+  printf '%s' "$filtered" | jq -r 'sort_by(.created_at) | last | .iid'
+}
+
 # -- pr_state --------------------------------------------------------------
 
 prtend_forge_pr_state() {

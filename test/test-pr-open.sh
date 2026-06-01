@@ -63,6 +63,9 @@ load_libs() {
   export PRTEND_FORGE=github
   # Mark the CLI as ready by default.
   _prtend_forge_gh_cli_ready() { return 0; }
+  # Default: branch has never had any PR (open, closed, or merged). Tests
+  # exercising the closed/merged path override this stub.
+  _prtend_forge_gh_pr_last_for_branch() { return 1; }
   # No system reviewers from config by default.
   unset PRTEND_SYSTEM_REVIEWERS
 }
@@ -208,15 +211,17 @@ case_pushed_existing_pr() {
 # Case 5 — closed PR exists → exit 4.
 # --------------------------------------------------------------------------
 case_closed_pr() {
-  echo "case: closed PR refusal"
+  echo "case: closed PR refusal (open-only probe misses it; fallback catches)"
   (
     new_sandbox
     cd "$SANDBOX"
     load_libs
     install_git_push_recorder
-    _prtend_forge_gh_pr_for_branch() { printf '300\n'; }
-    _prtend_forge_gh_pr_state()      { cat "$FIXTURES/pr_state.closed.json"; }
-    _prtend_forge_gh_default_branch(){ printf 'main\n'; }
+    # Real forge behavior: `pr_for_branch` returns no open PR.
+    _prtend_forge_gh_pr_for_branch()      { return 1; }
+    _prtend_forge_gh_pr_last_for_branch() { printf '300\n'; }
+    _prtend_forge_gh_pr_state()           { cat "$FIXTURES/pr_state.closed.json"; }
+    _prtend_forge_gh_default_branch()     { printf 'main\n'; }
     err="$(prtend_cmd_pr_open --title "x" 2>&1 1>/dev/null)"
     rc=$?
     assert_eq "exit code" 4 "$rc"
@@ -235,9 +240,10 @@ case_merged_pr() {
     new_sandbox
     cd "$SANDBOX"
     load_libs
-    _prtend_forge_gh_pr_for_branch() { printf '301\n'; }
-    _prtend_forge_gh_pr_state()      { cat "$FIXTURES/pr_state.merged.json"; }
-    _prtend_forge_gh_default_branch(){ printf 'main\n'; }
+    _prtend_forge_gh_pr_for_branch()      { return 1; }
+    _prtend_forge_gh_pr_last_for_branch() { printf '301\n'; }
+    _prtend_forge_gh_pr_state()           { cat "$FIXTURES/pr_state.merged.json"; }
+    _prtend_forge_gh_default_branch()     { printf 'main\n'; }
     prtend_cmd_pr_open --title "x" >/dev/null 2>&1
     rc=$?
     assert_eq "exit code" 4 "$rc"
