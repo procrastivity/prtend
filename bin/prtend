@@ -7,6 +7,9 @@ PRTEND_LIB="${PRTEND_LIB:-$(dirname "$(realpath "$0")")/../lib/prtend}"
 # shellcheck source=lib/prtend/prtend-lib.bash
 # shellcheck disable=SC1091
 source "$PRTEND_LIB/prtend-lib.bash"
+# shellcheck source=lib/prtend/prtend-forge-lib.bash
+# shellcheck disable=SC1091
+source "$PRTEND_LIB/prtend-forge-lib.bash"
 
 case "${1:-}" in
   detect|pr-open|ci-watch|reviews-poll|watch|note-post|defer-write|config|doctor)
