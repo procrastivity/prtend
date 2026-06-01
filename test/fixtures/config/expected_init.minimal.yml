@@ -1,0 +1,11 @@
+# prtend config — managed by `prtend config init` / `prtend config set`
+# See docs/overview.md § "First-run init (per repo)" for what each key does.
+
+watch_strategy: blocking
+write_target: xdg
+poll_interval_seconds: 15
+ci_retry_limit: 3
+
+system_reviewers:
+
+optional_reviewers:

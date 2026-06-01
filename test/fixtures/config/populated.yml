@@ -1,0 +1,12 @@
+watch_strategy: blocking
+write_target: xdg
+poll_interval_seconds: 30
+ci_retry_limit: 5
+
+system_reviewers:
+  - copilot
+  - duo
+
+optional_reviewers:
+  - alice
+  - bob

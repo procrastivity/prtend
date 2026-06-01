@@ -1,0 +1,6 @@
+watch_strategy: blocking
+write_target: xdg
+
+system_reviewers:
+  - "bot#1"
+  - copilot
