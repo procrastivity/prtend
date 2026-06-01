@@ -60,7 +60,7 @@ set -euo pipefail
 PRTEND_STATE_LIB_LOADED=1
 ```
 
-The dispatcher already sources `prtend-lib.bash` before any other lib, so the guard is a belt-and-braces check for ad-hoc `bash -c 'source ...'` callers. Match the guard idiom from `prtend-forge-lib.bash` — same wording, same exit path.
+The dispatcher already sources `prtend-lib.bash` before any other lib, so the guard is a belt-and-braces check for ad-hoc `bash -c 'source ...'` callers. (`prtend-forge-lib.bash` does not enforce this dep check — the state lib's guard is its own convention, not copied from the forge lib.)
 
 ### Canonical state-file shape
 
@@ -456,7 +456,7 @@ If `prtend_state_dir` returns a path that requires `git rev-parse` (i.e. you're 
 - [ ] `prtend_state_increment_ci_attempt` creates the file with seed shape if absent, returns the new count on stdout
 - [ ] `prtend_state_read` and `prtend_state_get_cursor` exit 0 with empty stdout when the file is absent
 - [ ] `prtend_state_clear` is idempotent (`rm -f`)
-- [ ] Lib refuses to load without `prtend-lib.bash` sourced first (parity with `prtend-forge-lib.bash`)
+- [ ] Lib refuses to load without `prtend-lib.bash` sourced first
 - [ ] No new dependency on `prtend-forge-lib.bash`; `forge` field reads `$PRTEND_FORGE` with `"unknown"` fallback
 - [ ] `shellcheck` clean on the new lib and unchanged dispatcher / other libs
 - [ ] `bin/prtend` is unchanged — state lib is sourced by subcommands starting in step 07, not by the dispatcher
