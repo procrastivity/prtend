@@ -21,7 +21,7 @@ PRTEND_NOTE_MARKER="<!-- prtend: handled ${PRTEND_NOTE_MARKER_VERSION} -->"
 # Order matters only for grep speed (longest-match first is irrelevant for
 # fixed strings — keep newest first as a convention).
 PRTEND_NOTE_MARKER_PATTERNS=(
-  "<!-- prtend: handled v1 -->"
+  "$PRTEND_NOTE_MARKER"
 )
 
 prtend_note_marker() {

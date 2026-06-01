@@ -15,7 +15,7 @@ Required on the host for verification: `bash` 4.4+. No `jq`, no forge CLI — th
 
 ## Goal
 
-After this step, `lib/prtend/prtend-notes-lib.bash` defines the marker constants and six public functions from `../repo-bootstrap.md` § "Notes & marker", each emitting the canonical body shape from `../overview.md` § "Note templates":
+After this step, `lib/prtend/prtend-notes-lib.bash` defines the marker constants and seven public functions from `../repo-bootstrap.md` § "Notes & marker", each emitting the canonical body shape from `../overview.md` § "Note templates":
 
 - `prtend_note_marker` — print the literal marker line `<!-- prtend: handled v1 -->`. No newline-only argument forms; the marker is fixed.
 - `prtend_note_marker_version` — print `v1`. The version string is consumed by `note-post`'s JSON output (`marker_version` field, see `../cli-contract.md` § "note-post").
@@ -37,7 +37,7 @@ No subcommand consumes the lib yet; step 10's `note-post` composes `prtend_note_
 
 ### File header
 
-Mirror the load-guard idiom from `prtend-forge-lib.bash` and `prtend-state-lib.bash` (step 05): dep check before the load guard, before `set -euo pipefail`. The reasoning is the same one documented in step 05 — `set -e` leaks into the caller, and a poisoned guard makes a later correct source silently no-op.
+Mirror the load-guard idiom from `prtend-forge-lib.bash` and `prtend-state-lib.bash` (step 05): load guard first, then dep check, before `set -euo pipefail`. The reasoning is the same one documented in step 05 — `set -e` leaks into the caller, and a poisoned guard makes a later correct source silently no-op.
 
 ```bash
 #!/usr/bin/env bash
