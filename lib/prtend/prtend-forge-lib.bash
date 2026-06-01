@@ -64,6 +64,8 @@ _prtend_forge_sniff_url() {
   else
     return 1
   fi
+  # Hostnames are case-insensitive — normalise before label matching.
+  host="${host,,}"
   # Match `github` / `gitlab` only as a full dot-separated label.
   case ".${host}." in
     *.github.*) printf 'github\n' ;;
