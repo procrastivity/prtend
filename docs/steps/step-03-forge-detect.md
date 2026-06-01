@@ -9,7 +9,7 @@ Create `prtend-forge-lib.bash`, the single module that knows about `gh` vs `glab
 - Step 01 (`scaffold`) complete — `lib/prtend/` exists.
 - Step 02 (`dispatcher`) complete — `prtend-lib.bash` provides `prtend_log_*` helpers; `bin/prtend` knows how to source libs.
 
-Required on the host for smoke tests: `gh` (with at least `--version` working), `glab` (with at least `--version` working), and a git checkout pointing at either a GitHub or GitLab remote.
+Required on the host for smoke tests: the forge CLI matching the checkout you're testing against (either `gh` or `glab`, with at least `--version` working), and a git checkout pointing at that forge's remote. Having both CLIs installed lets you exercise the "both `gh` and `glab` succeed" tiebreaker branch, but it isn't required for the core verification — the GitLab path can be exercised via `PRTEND_FORGE=gitlab` to hit the cache.
 
 ## Goal
 

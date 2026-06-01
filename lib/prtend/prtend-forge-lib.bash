@@ -25,24 +25,49 @@ prtend_forge_dispatch() {
   if [[ -z "${PRTEND_FORGE:-}" ]]; then
     prtend_forge_detect >/dev/null || return $?
   fi
+  local handler
   case "$PRTEND_FORGE" in
-    github) "_prtend_forge_gh_${suffix}" "$@" ;;
-    gitlab) "_prtend_forge_gl_${suffix}" "$@" ;;
+    github) handler="_prtend_forge_gh_${suffix}" ;;
+    gitlab) handler="_prtend_forge_gl_${suffix}" ;;
     *)
       prtend_log_error "prtend_forge_dispatch: unknown forge '$PRTEND_FORGE'"
       return 2
       ;;
   esac
+  if ! declare -F "$handler" >/dev/null; then
+    prtend_log_error "prtend_forge_dispatch: handler '$handler' not implemented"
+    return 2
+  fi
+  "$handler" "$@"
 }
 
 # -- detection -------------------------------------------------------------
 
 # Sniff a forge from a git remote URL. Echoes "github" | "gitlab" or nothing.
+# Extracts the host first, then matches on dot-bounded labels so hosts like
+# `notgithub.com` or `fakegitlab.io` don't match — only real `github`/`gitlab`
+# domain labels do (covers `github.com`, GHE hosts like `github.example.com`,
+# `git.gitlab.mycorp`, etc.).
 _prtend_forge_sniff_url() {
-  local url="${1:-}"
-  case "$url" in
-    *github.com*|*github.*) printf 'github\n' ;;
-    *gitlab.com*|*gitlab.*) printf 'gitlab\n' ;;
+  local url="${1:-}" host
+  if [[ -z "$url" ]]; then
+    return 1
+  fi
+  if [[ "$url" == *"://"* ]]; then
+    host="${url#*://}"
+    host="${host#*@}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+  elif [[ "$url" == *:* ]]; then
+    host="${url#*@}"
+    host="${host%%:*}"
+  else
+    return 1
+  fi
+  # Match `github` / `gitlab` only as a full dot-separated label.
+  case ".${host}." in
+    *.github.*) printf 'github\n' ;;
+    *.gitlab.*) printf 'gitlab\n' ;;
     *) return 1 ;;
   esac
 }
