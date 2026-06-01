@@ -618,3 +618,182 @@ _prtend_forge_gl_comment_body() {
   project_id="$(_prtend_forge_gl_project_id)" || return $?
   glab api "projects/${project_id}/merge_requests/${pr}/notes/${comment_id}" --jq .body
 }
+
+# -- pr_create -------------------------------------------------------------
+
+prtend_forge_pr_create() {
+  prtend_forge_dispatch pr_create "$@"
+}
+
+# Parse the trailing integer of a forge-printed URL (e.g.
+# `https://github.com/owner/repo/pull/124`). Echoes the integer, exit 0 on
+# success, exit 1 if no integer suffix was found.
+_prtend_forge_parse_pr_from_url() {
+  local url="${1:-}" tail
+  tail="${url##*/}"
+  # Strip surrounding whitespace / trailing CR.
+  tail="${tail//$'\r'/}"
+  tail="${tail%"${tail##*[![:space:]]}"}"
+  if [[ "$tail" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$tail"
+    return 0
+  fi
+  return 1
+}
+
+# Common flag parser for the create privates. Sets the global associative
+# array PRTEND_FORGE_PRCREATE_ARGS with keys: title, body, draft, target.
+_prtend_forge_parse_create_args() {
+  PRTEND_FORGE_PRCREATE_TITLE=""
+  PRTEND_FORGE_PRCREATE_BODY=""
+  PRTEND_FORGE_PRCREATE_DRAFT=0
+  PRTEND_FORGE_PRCREATE_TARGET=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --title)
+        PRTEND_FORGE_PRCREATE_TITLE="${2:-}"; shift 2 ;;
+      --body)
+        PRTEND_FORGE_PRCREATE_BODY="${2:-}"; shift 2 ;;
+      --draft)
+        PRTEND_FORGE_PRCREATE_DRAFT=1; shift ;;
+      --target-branch)
+        PRTEND_FORGE_PRCREATE_TARGET="${2:-}"; shift 2 ;;
+      *)
+        prtend_log_error "pr_create: unknown argument '$1'"; return 2 ;;
+    esac
+  done
+  if [[ -z "$PRTEND_FORGE_PRCREATE_TITLE" ]]; then
+    prtend_log_error "pr_create: --title is required"
+    return 2
+  fi
+}
+
+_prtend_forge_gh_pr_create() {
+  _prtend_forge_parse_create_args "$@" || return $?
+  local branch out url
+  branch="$(prtend_forge_current_branch)" || return $?
+  local -a argv=(gh pr create --head "$branch" --title "$PRTEND_FORGE_PRCREATE_TITLE")
+  argv+=(--body "$PRTEND_FORGE_PRCREATE_BODY")
+  if (( PRTEND_FORGE_PRCREATE_DRAFT == 1 )); then
+    argv+=(--draft)
+  fi
+  if [[ -n "$PRTEND_FORGE_PRCREATE_TARGET" ]]; then
+    argv+=(--base "$PRTEND_FORGE_PRCREATE_TARGET")
+  fi
+  if ! out="$("${argv[@]}")"; then
+    return 1
+  fi
+  # Tail line is the URL; previous lines may be warnings.
+  url="$(printf '%s' "$out" | tail -n1)"
+  if ! _prtend_forge_parse_pr_from_url "$url"; then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+}
+
+_prtend_forge_gl_pr_create() {
+  _prtend_forge_parse_create_args "$@" || return $?
+  local branch out url
+  branch="$(prtend_forge_current_branch)" || return $?
+  local -a argv=(glab mr create --source-branch "$branch" --title "$PRTEND_FORGE_PRCREATE_TITLE")
+  argv+=(--description "$PRTEND_FORGE_PRCREATE_BODY")
+  if (( PRTEND_FORGE_PRCREATE_DRAFT == 1 )); then
+    argv+=(--draft)
+  fi
+  if [[ -n "$PRTEND_FORGE_PRCREATE_TARGET" ]]; then
+    argv+=(--target-branch "$PRTEND_FORGE_PRCREATE_TARGET")
+  fi
+  if ! out="$("${argv[@]}")"; then
+    return 1
+  fi
+  url="$(printf '%s' "$out" | tail -n1)"
+  if ! _prtend_forge_parse_pr_from_url "$url"; then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+}
+
+# -- pr_url ----------------------------------------------------------------
+
+prtend_forge_pr_url() {
+  prtend_forge_dispatch pr_url "$@"
+}
+
+_prtend_forge_gh_pr_url() {
+  local pr="${1:-}" out
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "pr_url: missing pr argument"; return 2
+  fi
+  out="$(gh pr view "$pr" --json url -q .url)" || return $?
+  if [[ -z "$out" ]]; then return 1; fi
+  printf '%s\n' "$out"
+}
+
+_prtend_forge_gl_pr_url() {
+  local pr="${1:-}" out
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "pr_url: missing pr argument"; return 2
+  fi
+  out="$(glab mr view "$pr" --output json | jq -r '.web_url // empty')" || return $?
+  if [[ -z "$out" ]]; then return 1; fi
+  printf '%s\n' "$out"
+}
+
+# -- reviewer_add ----------------------------------------------------------
+
+prtend_forge_reviewer_add() {
+  prtend_forge_dispatch reviewer_add "$@"
+}
+
+# Exit 0 — added (or already present). Exit 1 — forge rejected (unknown user,
+# no permission). Exit ≥2 — CLI/network failure; propagated.
+_prtend_forge_gh_reviewer_add() {
+  local pr="${1:-}" login="${2:-}" err err_file rc=0
+  if [[ -z "$pr" || -z "$login" ]]; then
+    prtend_log_error "reviewer_add: missing pr or login argument"; return 2
+  fi
+  err_file="$(mktemp)"
+  gh pr edit "$pr" --add-reviewer "$login" >/dev/null 2>"$err_file" || rc=$?
+  err="$(cat "$err_file")"; rm -f "$err_file"
+  if (( rc == 0 )); then return 0; fi
+  if [[ "$err" == *"Could not request reviewer"* \
+        || "$err" == *"Could not resolve to a User"* \
+        || "$err" == *"Reviewers could not be added"* ]]; then
+    printf '%s\n' "$err" >&2
+    return 1
+  fi
+  printf '%s\n' "$err" >&2
+  return "$rc"
+}
+
+# Older glab versions REPLACE the reviewer set on `--reviewer`. To stay
+# additive across versions we read the current list, append (skipping
+# duplicates), and pass the combined list. See docs/forge-mapping.md
+# § "Add reviewer".
+_prtend_forge_gl_reviewer_add() {
+  local pr="${1:-}" login="${2:-}" mr_json existing combined err err_file rc=0
+  if [[ -z "$pr" || -z "$login" ]]; then
+    prtend_log_error "reviewer_add: missing pr or login argument"; return 2
+  fi
+  mr_json="$(glab mr view "$pr" --output json)" || return $?
+  existing="$(printf '%s' "$mr_json" | jq -r '[.reviewers[]?.username] | join(",")')"
+  # Already requested → idempotent success.
+  if [[ ",$existing," == *",$login,"* ]]; then
+    return 0
+  fi
+  if [[ -n "$existing" ]]; then
+    combined="$existing,$login"
+  else
+    combined="$login"
+  fi
+  err_file="$(mktemp)"
+  glab mr update "$pr" --reviewer "$combined" >/dev/null 2>"$err_file" || rc=$?
+  err="$(cat "$err_file")"; rm -f "$err_file"
+  if (( rc == 0 )); then return 0; fi
+  if [[ "$err" == *"not found"* || "$err" == *"User Not Found"* || "$err" == *"404"* ]]; then
+    printf '%s\n' "$err" >&2
+    return 1
+  fi
+  printf '%s\n' "$err" >&2
+  return "$rc"
+}
