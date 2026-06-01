@@ -1,0 +1,3 @@
+Please rename this variable for clarity.
+<!-- prtend: handled v1 -->
+Resolution: Accept — fixed in abc1234

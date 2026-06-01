@@ -113,12 +113,16 @@ prtend_cmd_note_post() {
     return "$rc"
   fi
 
-  # 2. Idempotency probe. Read existing body; check for marker.
-  local body_existing="" probe_rc=0
-  body_existing="$(prtend_forge_comment_body "$pr" "$comment" 2>/dev/null)" || probe_rc=$?
+  # 2. Idempotency probe. The marker lives in the *reply* we post, not in
+  #    the reviewer's original comment — so we scan every body in the thread
+  #    (original + replies / discussion notes) and refuse if any already
+  #    carries a prtend marker. Checking only the original comment would
+  #    miss prior handled state and let retries double-post.
+  local thread_bodies="" probe_rc=0
+  thread_bodies="$(prtend_forge_review_thread_bodies "$pr" "$comment" 2>/dev/null)" || probe_rc=$?
   case "$probe_rc" in
     0)
-      if prtend_note_is_handled "$body_existing"; then
+      if prtend_note_is_handled "$thread_bodies"; then
         printf 'prtend: comment %s already has a prtend marker; refusing to double-post\n' \
           "$comment" >&2
         return 4

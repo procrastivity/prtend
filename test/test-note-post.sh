@@ -57,8 +57,8 @@ load_libs() {
   set +e
   export PRTEND_FORGE=github
   _prtend_forge_gh_cli_ready() { return 0; }
-  # Default: comment exists, no marker.
-  _prtend_forge_gh_comment_body() { cat "$FIXTURES/comment_body.plain.txt"; }
+  # Default: thread exists, no marker anywhere in it (original + replies).
+  _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/comment_body.plain.txt"; }
   # Default: reply posts successfully with id 456810.
   _prtend_forge_gh_post_review_reply() {
     cat >/dev/null
@@ -161,7 +161,36 @@ case_idempotent_refusal() {
     new_sandbox
     cd "$SANDBOX"
     load_libs
-    _prtend_forge_gh_comment_body() { cat "$FIXTURES/comment_body.handled.txt"; }
+    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/comment_body.handled.txt"; }
+    posted_called="$(mktemp)"
+    _prtend_forge_gh_post_review_reply() {
+      cat >/dev/null
+      printf 'called\n' >"$posted_called"
+      printf '999\n'
+    }
+    err="$(prtend_cmd_note_post --pr 123 --comment 456789 \
+      --kind accept --commit abc 2>&1 1>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 4 "$rc"
+    assert_contains "stderr message" "already has a prtend marker" "$err"
+    assert_eq "post not invoked" "" "$(cat "$posted_called")"
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 5b — idempotency refusal: marker lives in a REPLY, not the original
+# comment. This is the realistic scenario: prtend's reply (containing the
+# marker) is a separate node in the thread; the reviewer's original comment
+# never gets edited. Probing only the original body would miss this and
+# double-post.
+# ----------------------------------------------------------------------------
+case_idempotent_refusal_reply() {
+  echo "case: idempotency refusal (marker in reply, not original)"
+  (
+    new_sandbox
+    cd "$SANDBOX"
+    load_libs
+    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread.handled-in-reply.txt"; }
     posted_called="$(mktemp)"
     _prtend_forge_gh_post_review_reply() {
       cat >/dev/null
@@ -186,7 +215,7 @@ case_comment_not_found() {
     new_sandbox
     cd "$SANDBOX"
     load_libs
-    _prtend_forge_gh_comment_body() { return 1; }
+    _prtend_forge_gh_review_thread_bodies() { return 1; }
     err="$(prtend_cmd_note_post --pr 123 --comment 456789 \
       --kind accept --commit abc 2>&1 1>/dev/null)"
     rc=$?
@@ -425,6 +454,7 @@ case_accept
 case_halt
 case_defer
 case_idempotent_refusal
+case_idempotent_refusal_reply
 case_comment_not_found
 case_not_authed
 case_kind_ignore
