@@ -136,6 +136,54 @@ prtend_config_resolve() {
   return 0
 }
 
+# Inverse of prtend_config_resolve: print the path that the given write-target
+# WOULD write to, independent of whether a file is there yet. Used by
+# `config init` to pick a destination and by `config show` to render the
+# resolution chain. Never checks `-f`.
+#
+# env  → $PRTEND_CONFIG (return 1 if unset/empty)
+# xdg  → $XDG_CONFIG_HOME/prtend/<slug>.yml (return 1 if XDG/HOME unset or
+#        slug unresolvable)
+# repo → <repo-root>/.claude/pr-reviewers.yml (return 1 if not in a git repo)
+prtend_config_target_path() {
+  local target="${1:-}" slug xdg repo_root
+  if [[ -z "$target" ]]; then
+    prtend_log_error "prtend_config_target_path: missing target argument"
+    return 2
+  fi
+  case "$target" in
+    env)
+      if [[ -z "${PRTEND_CONFIG:-}" ]]; then
+        return 1
+      fi
+      printf '%s\n' "$PRTEND_CONFIG"
+      ;;
+    xdg)
+      if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+        xdg="$XDG_CONFIG_HOME"
+      elif [[ -n "${HOME:-}" ]]; then
+        xdg="$HOME/.config"
+      else
+        return 1
+      fi
+      if ! slug="$(prtend_repo_slug 2>/dev/null)"; then
+        return 1
+      fi
+      printf '%s/prtend/%s.yml\n' "$xdg" "$slug"
+      ;;
+    repo)
+      if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+        return 1
+      fi
+      printf '%s/.claude/pr-reviewers.yml\n' "$repo_root"
+      ;;
+    *)
+      prtend_log_error "prtend_config_target_path: unknown target '$target' (expected env|xdg|repo)"
+      return 2
+      ;;
+  esac
+}
+
 # Naive scalar lookup against the resolved YAML. Sufficient for v0 flat-scalar
 # keys (watch_strategy, poll_interval_seconds, ci_retry_limit). Returns only the
 # first matching scalar value; list-valued keys (system_reviewers,
@@ -224,13 +272,15 @@ prtend_config_list_get() {
     # Indented `- value`.
     if [[ "$line" =~ ^[[:space:]]+-[[:space:]]+(.+)$ ]]; then
       v="${BASH_REMATCH[1]}"
-      # Strip trailing comment.
-      v="${v%%#*}"
-      # Trim trailing whitespace.
-      v="${v%"${v##*[![:space:]]}"}"
-      # Strip surrounding quotes if matched.
-      if [[ "$v" =~ ^\"(.*)\"$ ]] || [[ "$v" =~ ^\'(.*)\'$ ]]; then
+      # Strip surrounding quotes if matched (before comment stripping, so
+      # that a `#` inside a quoted value isn't mistaken for a YAML comment).
+      if [[ "$v" =~ ^\"(.*)\"[[:space:]]*(#.*)?$ ]] || [[ "$v" =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
         v="${BASH_REMATCH[1]}"
+      else
+        # Strip trailing comment.
+        v="${v%%#*}"
+        # Trim trailing whitespace.
+        v="${v%"${v##*[![:space:]]}"}"
       fi
       if [[ -n "$v" ]]; then
         printf '%s\n' "$v"
