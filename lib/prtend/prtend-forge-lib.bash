@@ -191,3 +191,368 @@ prtend_forge_cli_ready() {
 prtend_forge_current_branch() {
   git rev-parse --abbrev-ref HEAD
 }
+
+# -- repo identity helpers -------------------------------------------------
+
+# {owner}/{repo} for the current GitHub remote. Per-call; do not cache across
+# invocations (would require a global to invalidate). See docs/steps/step-04.
+_prtend_forge_gh_repo_slug() {
+  gh repo view --json nameWithOwner -q .nameWithOwner
+}
+
+# Numeric project ID for the current GitLab remote. Per-call; not cached.
+_prtend_forge_gl_project_id() {
+  glab repo view --output json | jq -r '.id'
+}
+
+# Convert an ISO-8601 timestamp to epoch seconds. Tries GNU `date -d` first,
+# falls back to BSD `date -j -f`. Echoes the epoch on stdout, exit 0 on
+# success, exit 1 if neither form parses.
+_prtend_iso_to_epoch() {
+  local ts="$1" out
+  if out="$(date -u -d "$ts" +%s 2>/dev/null)"; then
+    printf '%s\n' "$out"; return 0
+  fi
+  if out="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null)"; then
+    printf '%s\n' "$out"; return 0
+  fi
+  return 1
+}
+
+# -- pr_for_branch ---------------------------------------------------------
+
+prtend_forge_pr_for_branch() {
+  prtend_forge_dispatch pr_for_branch "$@"
+}
+
+# Exit 0 + number on single match; exit 1 + empty on no match;
+# exit 2 + empty on multiple matches.
+_prtend_forge_gh_pr_for_branch() {
+  local branch="${1:-}" out count
+  if [[ -z "$branch" ]]; then
+    prtend_log_error "pr_for_branch: missing branch argument"
+    return 2
+  fi
+  out="$(gh pr list --head "$branch" --state open --json number)" || return $?
+  count="$(printf '%s' "$out" | jq 'length')"
+  if (( count == 0 )); then return 1; fi
+  if (( count > 1 )); then return 2; fi
+  printf '%s\n' "$out" | jq -r '.[0].number'
+}
+
+_prtend_forge_gl_pr_for_branch() {
+  local branch="${1:-}" project_id out filtered count
+  if [[ -z "$branch" ]]; then
+    prtend_log_error "pr_for_branch: missing branch argument"
+    return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  out="$(glab mr list --source-branch "$branch" --state opened --output json)" || return $?
+  filtered="$(printf '%s' "$out" | jq --argjson pid "$project_id" \
+    '[ .[] | select(.target_project_id == $pid) ]')"
+  count="$(printf '%s' "$filtered" | jq 'length')"
+  if (( count == 0 )); then return 1; fi
+  if (( count > 1 )); then return 2; fi
+  printf '%s\n' "$filtered" | jq -r '.[0].iid'
+}
+
+# -- pr_state --------------------------------------------------------------
+
+prtend_forge_pr_state() {
+  prtend_forge_dispatch pr_state "$@"
+}
+
+_prtend_forge_gh_pr_state() {
+  local pr="${1:-}"
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "pr_state: missing pr argument"; return 2
+  fi
+  gh pr view "$pr" --json state,isDraft | jq -c '
+    if .state == "OPEN" and (.isDraft // false) then {state: "draft"}
+    elif .state == "OPEN" then {state: "open"}
+    elif .state == "MERGED" then {state: "merged"}
+    elif .state == "CLOSED" then {state: "closed"}
+    else {state: (.state // "" | ascii_downcase)} end'
+}
+
+_prtend_forge_gl_pr_state() {
+  local pr="${1:-}"
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "pr_state: missing pr argument"; return 2
+  fi
+  glab mr view "$pr" --output json | jq -c '
+    if .state == "opened" and (.draft // false) then {state: "draft"}
+    elif .state == "opened" then {state: "open"}
+    elif .state == "merged" then {state: "merged"}
+    elif .state == "closed" or .state == "locked" then {state: "closed"}
+    else {state: (.state // "")} end'
+}
+
+# -- ci_status -------------------------------------------------------------
+
+prtend_forge_ci_status() {
+  prtend_forge_dispatch ci_status "$@"
+}
+
+# `gh pr checks` exits non-zero (e.g. 8) when checks have failed or are still
+# pending — that is data, not an API error. Capture exit code and treat any
+# JSON output as authoritative; only propagate the failure when stdout is empty.
+_prtend_forge_gh_ci_status() {
+  local pr="${1:-}" out rc=0
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "ci_status: missing pr argument"; return 2
+  fi
+  # `gh pr checks --json` exposes `bucket` (pass/fail/pending/skipping/cancel)
+  # rather than a separate conclusion field; we map bucket → canonical conclusion.
+  # When the PR has no checks at all, gh exits 1 with empty stdout and the
+  # string "no checks reported" on stderr — that's a valid observation, not
+  # an error, so we distinguish it from genuine API failures.
+  local err_file err
+  err_file="$(mktemp)"
+  out="$(gh pr checks "$pr" --json name,state,bucket,link 2>"$err_file")" || rc=$?
+  err="$(cat "$err_file")"; rm -f "$err_file"
+  if [[ -z "$out" ]]; then
+    if (( rc != 0 )) && [[ "$err" != *"no checks reported"* ]]; then
+      printf '%s\n' "$err" >&2
+      return "$rc"
+    fi
+    printf '{"state":"pending","checks":[]}\n'
+    return 0
+  fi
+  printf '%s' "$out" | jq -c '
+    def map_bucket(b):
+      if   b == "pass"     then "success"
+      elif b == "fail"     then "failure"
+      elif b == "pending"  then "pending"
+      elif b == "skipping" then "skipped"
+      elif b == "cancel"   then "cancelled"
+      else (b // "") end;
+    def per_check: {
+      name:       (.name // ""),
+      state:      ((.state // "") | ascii_downcase),
+      conclusion: map_bucket(.bucket // ""),
+      url:        (.link // "")
+    };
+    (map(per_check)) as $cs
+    | { state: (
+          if   any($cs[]; .conclusion == "failure") then "failure"
+          elif any($cs[]; .conclusion == "pending") then "running"
+          elif ($cs | length) == 0                  then "pending"
+          else "success" end),
+        checks: $cs }'
+}
+
+# Two-step: MR view → head_pipeline.id; then `glab ci status --pipeline`.
+# "No pipeline yet" is a valid observation, not an error.
+_prtend_forge_gl_ci_status() {
+  local pr="${1:-}" mr_json pipeline_id pipeline_status jobs_json
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "ci_status: missing pr argument"; return 2
+  fi
+  mr_json="$(glab mr view "$pr" --output json)" || return $?
+  pipeline_id="$(printf '%s' "$mr_json" | jq -r '.head_pipeline.id // empty')"
+  if [[ -z "$pipeline_id" ]]; then
+    printf '{"state":"pending","checks":[]}\n'
+    return 0
+  fi
+  pipeline_status="$(printf '%s' "$mr_json" | jq -r '.head_pipeline.status // "pending"')"
+  jobs_json="$(glab ci status --pipeline "$pipeline_id" --output json)" || return $?
+  printf '%s' "$jobs_json" | jq -c --arg pstate "$pipeline_status" '
+    def map_state(s):
+      if   s == "failed"   then "failure"
+      elif s == "success"  then "success"
+      elif s == "running"  then "running"
+      elif s == "pending"  then "pending"
+      elif s == "canceled" then "cancelled"
+      else s end;
+    (if type == "array" then . else (.jobs // []) end) as $jobs
+    | { state: map_state($pstate),
+        checks: [ $jobs[] | {
+          name:       (.name // ""),
+          state:      (.status // ""),
+          conclusion: map_state(.status // ""),
+          url:        (.web_url // "")
+        } ] }'
+}
+
+# -- reviews_since ---------------------------------------------------------
+
+prtend_forge_reviews_since() {
+  prtend_forge_dispatch reviews_since "$@"
+}
+
+# Cursor for GitHub is the last seen review ID (numeric). Empty cursor → all.
+# next_cursor is the largest review id observed (or the input cursor if no
+# new reviews). Per-batch comment_ids require a second API call per review.
+_prtend_forge_gh_reviews_since() {
+  local pr="${1:-}" cursor="${2:-}" slug reviews_json filtered count i
+  local review_id submitted_at author state comments_json comment_ids batch
+  local batches max_id
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "reviews_since: missing pr argument"; return 2
+  fi
+  [[ -z "$cursor" ]] && cursor=0
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  reviews_json="$(gh api "repos/${slug}/pulls/${pr}/reviews" --paginate)" || return $?
+
+  filtered="$(printf '%s' "$reviews_json" | jq -c --argjson cur "$cursor" '
+    [ .[] | select(.id > $cur) ] | sort_by(.submitted_at)')"
+  count="$(printf '%s' "$filtered" | jq 'length')"
+  batches='[]'
+  max_id="$cursor"
+  for ((i=0; i<count; i++)); do
+    review_id="$(printf '%s' "$filtered" | jq -r ".[$i].id")"
+    submitted_at="$(printf '%s' "$filtered" | jq -r ".[$i].submitted_at // \"\"")"
+    author="$(printf '%s' "$filtered" | jq -r ".[$i].user.login // \"\"")"
+    state="$(printf '%s' "$filtered" | jq -r "
+      .[$i].state // \"\" | ascii_downcase
+      | if . == \"changes_requested\" then \"changes_requested\"
+        elif . == \"approved\" then \"approved\"
+        else \"commented\" end")"
+    if ! comments_json="$(gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate 2>/dev/null)"; then
+      comments_json='[]'
+    fi
+    comment_ids="$(printf '%s' "$comments_json" | jq '[ .[] | (.id | tostring) ]')"
+    batch="$(jq -nc \
+      --arg id "$review_id" --arg sa "$submitted_at" \
+      --arg au "$author" --arg st "$state" \
+      --argjson cids "$comment_ids" \
+      '{batch_id: $id, submitted_at: $sa, author: $au, state: $st, comment_ids: $cids}')"
+    batches="$(printf '%s' "$batches" | jq -c --argjson b "$batch" '. + [$b]')"
+    if (( review_id > max_id )); then max_id="$review_id"; fi
+  done
+  jq -nc --argjson batches "$batches" --arg cursor "$max_id" \
+    '{batches: $batches, next_cursor: $cursor}'
+}
+
+# Returns 0 if the discussion is settled (no new note has arrived within the
+# quiet window), 1 otherwise. Used by step-05's reviews-poll subcommand.
+# Argument: ISO-8601 timestamp of the latest note in the discussion.
+_prtend_forge_gl_discussion_settled() {
+  local latest="${1:-}" quiet_window now latest_epoch
+  if [[ -z "$latest" ]]; then return 2; fi
+  quiet_window="${PRTEND_QUIET_WINDOW:-60}"
+  now="$(date -u +%s)"
+  if ! latest_epoch="$(_prtend_iso_to_epoch "$latest")"; then
+    return 2
+  fi
+  (( now - latest_epoch > quiet_window ))
+}
+
+# Cursor for GitLab is an ISO-8601 timestamp (the latest settled-note time
+# seen so far). A discussion is emitted only when (a) all its notes are newer
+# than the cursor, and (b) the latest note is older than now - PRTEND_QUIET_WINDOW.
+_prtend_forge_gl_reviews_since() {
+  local pr="${1:-}" cursor="${2:-}" project_id quiet_window now
+  local discussions_json filtered batches next_cursor cursor_epoch
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "reviews_since: missing pr argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  quiet_window="${PRTEND_QUIET_WINDOW:-60}"
+  now="$(date -u +%s)"
+
+  cursor_epoch=0
+  if [[ -n "$cursor" ]]; then
+    cursor_epoch="$(_prtend_iso_to_epoch "$cursor" 2>/dev/null || echo 0)"
+  fi
+
+  discussions_json="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate)" || return $?
+
+  filtered="$(printf '%s' "$discussions_json" | jq -c \
+    --argjson cur "$cursor_epoch" --argjson now "$now" --argjson qw "$quiet_window" '
+    [ .[]
+      | . as $d
+      | ([ .notes[]? | select((.system // false) | not) | (.created_at | fromdateiso8601) ]) as $times
+      | select(($times | length) > 0)
+      | select(all($times[]; . > $cur))
+      | select(($times | max) <= ($now - $qw))
+      | {
+          batch_id:     (.id | tostring),
+          submitted_at: ([ .notes[]? | select((.system // false) | not) | .created_at ] | min // ""),
+          author:       (first(.notes[]? | select((.system // false) | not) | .author.username) // ""),
+          state:        "commented",
+          comment_ids:  [ .notes[]? | select((.system // false) | not) | (.id | tostring) ],
+          _max_t:       ($times | max)
+        }
+    ] | sort_by(.submitted_at)')"
+
+  batches="$(printf '%s' "$filtered" | jq -c '[ .[] | del(._max_t) ]')"
+  next_cursor="$(printf '%s' "$filtered" | jq -r --arg fb "$cursor" '
+    if length == 0 then $fb
+    else ([ .[]._max_t ] | max) | strftime("%Y-%m-%dT%H:%M:%SZ") end')"
+
+  jq -nc --argjson b "$batches" --arg c "$next_cursor" \
+    '{batches: $b, next_cursor: $c}'
+}
+
+# -- review_comments -------------------------------------------------------
+
+prtend_forge_review_comments() {
+  prtend_forge_dispatch review_comments "$@"
+}
+
+# anchor_stale is always emitted as false here — the lib has no view of HEAD.
+# Step-07's reviews-poll subcommand overwrites it after diffing against HEAD.
+_prtend_forge_gh_review_comments() {
+  local pr="${1:-}" review_id="${2:-}" slug
+  if [[ -z "$pr" || -z "$review_id" ]]; then
+    prtend_log_error "review_comments: missing pr or review-id argument"; return 2
+  fi
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate | jq -c '
+    { comments: [ .[] | {
+        comment_id:   (.id | tostring),
+        author:       (.user.login // ""),
+        body:         (.body // ""),
+        path:         (.path // ""),
+        line:         (.line // .original_line // .start_line // null),
+        anchor_stale: false,
+        created_at:   (.created_at // "")
+      } ] }'
+}
+
+_prtend_forge_gl_review_comments() {
+  local pr="${1:-}" discussion_id="${2:-}" project_id
+  if [[ -z "$pr" || -z "$discussion_id" ]]; then
+    prtend_log_error "review_comments: missing pr or discussion-id argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  glab api "projects/${project_id}/merge_requests/${pr}/discussions/${discussion_id}" | jq -c '
+    { comments: [ .notes[]? | select((.system // false) | not) | {
+        comment_id:   (.id | tostring),
+        author:       (.author.username // ""),
+        body:         (.body // ""),
+        path:         (.position.new_path // ""),
+        line:         (.position.new_line // null),
+        anchor_stale: false,
+        created_at:   (.created_at // "")
+      } ] }'
+}
+
+# -- comment_body ----------------------------------------------------------
+
+prtend_forge_comment_body() {
+  prtend_forge_dispatch comment_body "$@"
+}
+
+# Raw body text — NOT JSON. The skill's prtend_note_is_handled greps for the
+# marker in the body; a JSON wrapper would force every caller to re-parse.
+_prtend_forge_gh_comment_body() {
+  local pr="${1:-}" comment_id="${2:-}" slug
+  if [[ -z "$comment_id" ]]; then
+    prtend_log_error "comment_body: missing comment-id argument"; return 2
+  fi
+  : "${pr:-}"  # signature consistency; gh endpoint is PR-independent
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  gh api "repos/${slug}/pulls/comments/${comment_id}" --jq .body
+}
+
+_prtend_forge_gl_comment_body() {
+  local pr="${1:-}" comment_id="${2:-}" project_id
+  if [[ -z "$pr" || -z "$comment_id" ]]; then
+    prtend_log_error "comment_body: missing pr or comment-id argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  glab api "projects/${project_id}/merge_requests/${pr}/notes/${comment_id}" --jq .body
+}
