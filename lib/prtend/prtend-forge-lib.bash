@@ -664,27 +664,36 @@ prtend_forge_comment_info() {
 }
 
 _prtend_forge_gh_comment_info() {
-  local pr="${1:-}" comment_id="${2:-}" slug
+  local pr="${1:-}" comment_id="${2:-}" slug raw owning_pr
   if [[ -z "$comment_id" ]]; then
     prtend_log_error "comment_info: missing comment-id argument"; return 2
   fi
   if [[ -n "$pr" && ! "$pr" =~ ^[0-9]+$ ]]; then
     prtend_log_error "comment_info: --pr must be a positive integer"; return 2
   fi
-  : "${pr:-}"  # signature consistency; gh endpoint is PR-independent
   slug="$(_prtend_forge_gh_repo_slug)" || return $?
-  if ! gh api "repos/${slug}/pulls/comments/${comment_id}" 2>/dev/null \
-        | jq -c '{
-            comment_id:   (.id | tostring),
-            author:       (.user.login // ""),
-            body:         (.body // ""),
-            path:         (.path // ""),
-            line:         (.line // .original_line // .start_line // null),
-            url:          (.html_url // ""),
-            created_at:   (.created_at // "")
-          }'; then
+  if ! raw="$(gh api "repos/${slug}/pulls/comments/${comment_id}" 2>/dev/null)"; then
     return 1
   fi
+  # GitHub's review-comment endpoint is repo-scoped; `comment_id` alone could
+  # belong to any PR in the repo. Cross-check the response's pull_request_url
+  # (`.../pulls/<N>`) against the caller's `$pr` so a caller asking for
+  # PR 123 doesn't silently get back PR 456's comment.
+  if [[ -n "$pr" ]]; then
+    owning_pr="$(printf '%s' "$raw" | jq -r '.pull_request_url // "" | capture("/pulls/(?<n>[0-9]+)$").n // ""')"
+    if [[ -n "$owning_pr" && "$owning_pr" != "$pr" ]]; then
+      return 1
+    fi
+  fi
+  printf '%s' "$raw" | jq -c '{
+    comment_id:   (.id | tostring),
+    author:       (.user.login // ""),
+    body:         (.body // ""),
+    path:         (.path // ""),
+    line:         (.line // .original_line // .start_line // null),
+    url:          (.html_url // ""),
+    created_at:   (.created_at // "")
+  }'
 }
 
 _prtend_forge_gl_comment_info() {

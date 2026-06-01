@@ -146,9 +146,14 @@ prtend_cmd_defer_write() {
   fi
 
   # 6. Compose the doc.
-  local forge deferred_at comment_loc quoted
+  local forge deferred_at comment_loc quoted reason_yaml
   forge="$(prtend_forge_detect)" || forge=""
   deferred_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # YAML double-quoted scalars are a superset of JSON strings, so emitting the
+  # reason as JSON-encoded gives us a safely quoted YAML scalar — handles
+  # colons, leading `[`, `#`, embedded quotes, etc. without the frontmatter
+  # parsing as the wrong type.
+  reason_yaml="$(jq -nr --arg r "$reason" '$r | @json')"
 
   if [[ -n "$path_field" && -n "$line_field" ]]; then
     comment_loc="\`${path_field}:${line_field}\`"
@@ -167,7 +172,7 @@ pr: ${pr}
 comment_id: ${comment_id}
 forge: ${forge}
 deferred_at: ${deferred_at}
-reason: ${reason}
+reason: ${reason_yaml}
 ---
 
 # Deferred review feedback — PR #${pr}, comment ${comment_id}

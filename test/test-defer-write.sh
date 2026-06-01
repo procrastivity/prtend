@@ -419,6 +419,124 @@ case_json_shape() {
   )
 }
 
+# ----------------------------------------------------------------------------
+# Case 17 — reason with a colon is safely quoted in YAML frontmatter
+# ----------------------------------------------------------------------------
+case_reason_with_colon() {
+  echo "case: reason with colon quoted in YAML"
+  (
+    new_sandbox
+    cd "$SANDBOX"
+    load_libs
+    out="$(prtend_cmd_defer_write --pr 123 --comment 456789 \
+      --reason "Blocked: needs design review" 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 0 "$rc"
+    path="$(jq -r .path <<<"$out")"
+    body="$(cat "$path")"
+    assert_contains "frontmatter reason is double-quoted" \
+      $'reason: "Blocked: needs design review"' "$body"
+    # The body section still renders the reason as-is (no quoting wanted in markdown).
+    assert_contains "body section has raw reason" \
+      "## Reason for deferral"$'\n\n'"Blocked: needs design review" "$body"
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 18 — reason with embedded double-quote escapes safely
+# ----------------------------------------------------------------------------
+case_reason_with_quote() {
+  echo "case: reason with embedded quote escapes in YAML"
+  (
+    new_sandbox
+    cd "$SANDBOX"
+    load_libs
+    out="$(prtend_cmd_defer_write --pr 123 --comment 456789 \
+      --reason 'Says "later"' 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 0 "$rc"
+    path="$(jq -r .path <<<"$out")"
+    body="$(cat "$path")"
+    assert_contains "frontmatter escapes the inner quote" \
+      'reason: "Says \"later\""' "$body"
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 19 — GitHub PR-mismatch: comment belongs to a different PR
+# ----------------------------------------------------------------------------
+case_gh_pr_mismatch() {
+  echo "case: GitHub comment belongs to a different PR"
+  (
+    new_sandbox
+    cd "$SANDBOX"
+    # Don't go through load_libs's _prtend_forge_gh_comment_info stub — we
+    # need the real projection so the pull_request_url cross-check runs.
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/lib/prtend/prtend-lib.bash"
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/lib/prtend/prtend-forge-lib.bash"
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/lib/prtend/prtend-subcommands/defer_write.bash"
+    set +e
+    export PRTEND_FORGE=github
+    _prtend_forge_gh_cli_ready() { return 0; }
+    _prtend_forge_gh_repo_slug() { printf 'owner/repo\n'; }
+    # Mock `gh api` to return a comment whose pull_request_url points at PR 999.
+    gh() {
+      if [[ "${1:-}" == "api" ]]; then
+        printf '%s' '{"id":456789,"pull_request_url":"https://api.github.com/repos/owner/repo/pulls/999","user":{"login":"a"},"body":"x","path":"src/widget.ts","line":5,"html_url":"https://github.com/owner/repo/pull/999#discussion_r456789","created_at":"2026-05-31T19:48:13Z"}'
+        return 0
+      fi
+      command gh "$@"
+    }
+    err="$(prtend_cmd_defer_write --pr 123 --comment 456789 \
+      --reason "x" 2>&1 1>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 4 "$rc"
+    assert_contains "stderr signals not found" "not found" "$err"
+    if [[ ! -f "$SANDBOX/deferred/123-456789.md" ]]; then
+      assert_eq "no doc written" 0 0
+    else
+      assert_eq "no doc written" 0 1
+    fi
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 20 — GitHub PR-match: pull_request_url matches `$pr` → proceeds
+# ----------------------------------------------------------------------------
+case_gh_pr_match() {
+  echo "case: GitHub pull_request_url matches --pr"
+  (
+    new_sandbox
+    cd "$SANDBOX"
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/lib/prtend/prtend-lib.bash"
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/lib/prtend/prtend-forge-lib.bash"
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/lib/prtend/prtend-subcommands/defer_write.bash"
+    set +e
+    export PRTEND_FORGE=github
+    _prtend_forge_gh_cli_ready() { return 0; }
+    _prtend_forge_gh_repo_slug() { printf 'owner/repo\n'; }
+    gh() {
+      if [[ "${1:-}" == "api" ]]; then
+        printf '%s' '{"id":456789,"pull_request_url":"https://api.github.com/repos/owner/repo/pulls/123","user":{"login":"a"},"body":"x","path":"src/widget.ts","line":5,"html_url":"https://github.com/owner/repo/pull/123#discussion_r456789","created_at":"2026-05-31T19:48:13Z"}'
+        return 0
+      fi
+      command gh "$@"
+    }
+    out="$(prtend_cmd_defer_write --pr 123 --comment 456789 \
+      --reason "x" 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 0 "$rc"
+    assert_eq "pr in JSON"        '123'       "$(jq -c .pr <<<"$out")"
+    assert_eq "comment_id in JSON" '"456789"' "$(jq -c .comment_id <<<"$out")"
+  )
+}
+
 case_gh_inline
 case_gl_inline
 case_non_inline
@@ -435,6 +553,10 @@ case_snippet_line_1
 case_snippet_near_eof
 case_atomic_write_fail
 case_json_shape
+case_reason_with_colon
+case_reason_with_quote
+case_gh_pr_mismatch
+case_gh_pr_match
 
 PASS="$(grep -c '^P' "$RESULTS" || true)"
 FAIL="$(grep -c '^F' "$RESULTS" || true)"

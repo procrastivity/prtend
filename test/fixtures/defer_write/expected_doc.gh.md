@@ -3,7 +3,7 @@ pr: 123
 comment_id: 456789
 forge: github
 deferred_at: PLACEHOLDER
-reason: Pending design review
+reason: "Pending design review"
 ---
 
 # Deferred review feedback — PR #123, comment 456789
