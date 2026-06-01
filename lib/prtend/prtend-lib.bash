@@ -173,6 +173,75 @@ prtend_config_get() {
   printf '%s\n' "$value"
 }
 
+# Naive list reader for block-style YAML lists. Matches the scope choice of
+# prtend_config_get above; flow-style lists (`[a, b]`) are not supported. The
+# config writer (a future `config init`) always emits block-style.
+prtend_config_list_get() {
+  local key="${1:-}" path env_key
+  if [[ -z "$key" ]]; then
+    prtend_log_error "prtend_config_list_get: missing key argument"
+    return 2
+  fi
+  if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    prtend_log_error "prtend_config_list_get: invalid key '$key' (must match [A-Za-z_][A-Za-z0-9_]*)"
+    return 2
+  fi
+  env_key="PRTEND_$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
+  if [[ -n "${!env_key:-}" ]]; then
+    local IFS=','
+    # Split env var on commas; trim surrounding whitespace per item.
+    local item
+    for item in ${!env_key}; do
+      item="${item#"${item%%[![:space:]]*}"}"
+      item="${item%"${item##*[![:space:]]}"}"
+      [[ -n "$item" ]] && printf '%s\n' "$item"
+    done
+    return 0
+  fi
+  path="$(prtend_config_resolve)"
+  if [[ -z "$path" || ! -f "$path" ]]; then
+    return 0
+  fi
+  # Pure-bash parser: walk the file, find the `<key>:` line, then collect
+  # subsequent indented `- value` items until a non-list line or another
+  # top-level key.
+  local in_key=0 line v
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if (( in_key == 0 )); then
+      if [[ "$line" =~ ^${key}:[[:space:]]*$ ]]; then
+        in_key=1
+      fi
+      continue
+    fi
+    # Next top-level key (identifier at column 0 followed by `:`).
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*: ]]; then
+      break
+    fi
+    # Blank line — tolerated; stay in the list block.
+    if [[ "$line" =~ ^[[:space:]]*$ ]]; then
+      continue
+    fi
+    # Indented `- value`.
+    if [[ "$line" =~ ^[[:space:]]+-[[:space:]]+(.+)$ ]]; then
+      v="${BASH_REMATCH[1]}"
+      # Strip trailing comment.
+      v="${v%%#*}"
+      # Trim trailing whitespace.
+      v="${v%"${v##*[![:space:]]}"}"
+      # Strip surrounding quotes if matched.
+      if [[ "$v" =~ ^\"(.*)\"$ ]] || [[ "$v" =~ ^\'(.*)\'$ ]]; then
+        v="${BASH_REMATCH[1]}"
+      fi
+      if [[ -n "$v" ]]; then
+        printf '%s\n' "$v"
+      fi
+      continue
+    fi
+    # Indented non-list content — list block ended.
+    break
+  done <"$path"
+}
+
 # -- state dir -------------------------------------------------------------
 
 prtend_state_dir() {
