@@ -28,6 +28,14 @@ _prtend_state_now() {
   printf '%s\n' "$ts"
 }
 
+_prtend_state_validate_file() {
+  local path="$1"
+  if ! jq -e . < "$path" >/dev/null 2>&1; then
+    prtend_log_error "prtend-state: corrupt state file (not valid JSON): $path"
+    return 2
+  fi
+}
+
 _prtend_state_seed_json() {
   local pr="$1" forge_now ts
   forge_now="${PRTEND_FORGE:-unknown}"
@@ -89,6 +97,7 @@ prtend_state_increment_ci_attempt() {
 
   path="$(prtend_state_path "$pr")" || return $?
   if [[ -f "$path" ]]; then
+    _prtend_state_validate_file "$path" || return $?
     existing="$(cat -- "$path")"
   else
     existing="$(_prtend_state_seed_json "$pr")"
@@ -114,6 +123,7 @@ prtend_state_ci_attempts() {
     printf '0\n'
     return 0
   fi
+  _prtend_state_validate_file "$path" || return $?
   jq -r --arg sig "$sig" '.ci_attempts[$sig] // 0' < "$path"
 }
 
@@ -124,6 +134,7 @@ prtend_state_set_cursor() {
 
   path="$(prtend_state_path "$pr")" || return $?
   if [[ -f "$path" ]]; then
+    _prtend_state_validate_file "$path" || return $?
     existing="$(cat -- "$path")"
   else
     existing="$(_prtend_state_seed_json "$pr")"
@@ -144,6 +155,7 @@ prtend_state_get_cursor() {
   if [[ ! -f "$path" ]]; then
     return 0
   fi
+  _prtend_state_validate_file "$path" || return $?
   jq -r '.last_review_cursor // ""' < "$path"
 }
 
