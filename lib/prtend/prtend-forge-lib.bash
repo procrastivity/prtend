@@ -653,6 +653,63 @@ _prtend_forge_gl_comment_body() {
   glab api "projects/${project_id}/merge_requests/${pr}/notes/${comment_id}" --jq .body
 }
 
+# -- comment_info ----------------------------------------------------------
+
+# Structured cousin of `comment_body`: returns a canonical JSON object with
+# the full single-comment metadata needed to render a defer document. See
+# docs/forge-mapping.md § "Single comment body (for marker detection)" — the
+# per-forge endpoints are the same, only the projection differs.
+prtend_forge_comment_info() {
+  prtend_forge_dispatch comment_info "$@"
+}
+
+_prtend_forge_gh_comment_info() {
+  local pr="${1:-}" comment_id="${2:-}" slug
+  if [[ -z "$comment_id" ]]; then
+    prtend_log_error "comment_info: missing comment-id argument"; return 2
+  fi
+  if [[ -n "$pr" && ! "$pr" =~ ^[0-9]+$ ]]; then
+    prtend_log_error "comment_info: --pr must be a positive integer"; return 2
+  fi
+  : "${pr:-}"  # signature consistency; gh endpoint is PR-independent
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  if ! gh api "repos/${slug}/pulls/comments/${comment_id}" 2>/dev/null \
+        | jq -c '{
+            comment_id:   (.id | tostring),
+            author:       (.user.login // ""),
+            body:         (.body // ""),
+            path:         (.path // ""),
+            line:         (.line // .original_line // .start_line // null),
+            url:          (.html_url // ""),
+            created_at:   (.created_at // "")
+          }'; then
+    return 1
+  fi
+}
+
+_prtend_forge_gl_comment_info() {
+  local pr="${1:-}" comment_id="${2:-}" project_id
+  if [[ -z "$pr" || ! "$pr" =~ ^[0-9]+$ ]]; then
+    prtend_log_error "comment_info: --pr must be a positive integer"; return 2
+  fi
+  if [[ -z "$comment_id" ]]; then
+    prtend_log_error "comment_info: missing comment-id argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  if ! glab api "projects/${project_id}/merge_requests/${pr}/notes/${comment_id}" 2>/dev/null \
+        | jq -c '{
+            comment_id:   (.id | tostring),
+            author:       (.author.username // ""),
+            body:         (.body // ""),
+            path:         (.position.new_path // ""),
+            line:         (.position.new_line // null),
+            url:          (.web_url // ""),
+            created_at:   (.created_at // "")
+          }'; then
+    return 1
+  fi
+}
+
 # -- review_thread_bodies --------------------------------------------------
 
 # Concatenated bodies of every comment/note in the thread containing
