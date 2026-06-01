@@ -192,6 +192,51 @@ prtend_forge_current_branch() {
   git rev-parse --abbrev-ref HEAD
 }
 
+# -- default branch --------------------------------------------------------
+
+prtend_forge_default_branch() {
+  prtend_forge_dispatch default_branch "$@"
+}
+
+_prtend_forge_gh_default_branch() {
+  local out
+  out="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)" || return $?
+  if [[ -z "$out" ]]; then return 1; fi
+  printf '%s\n' "$out"
+}
+
+_prtend_forge_gl_default_branch() {
+  local out
+  out="$(glab repo view --output json | jq -r '.default_branch // empty')" || return $?
+  if [[ -z "$out" ]]; then return 1; fi
+  printf '%s\n' "$out"
+}
+
+# -- active remote ---------------------------------------------------------
+
+# Forge-agnostic. Prints the remote name PRs/MRs go to: branch upstream's
+# remote if set, else `origin` if it exists, else the first remote sorted
+# lexicographically. Exit 1 if no remotes at all.
+prtend_forge_active_remote() {
+  local upstream remote remotes
+  if upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
+    remote="${upstream%%/*}"
+    if [[ -n "$remote" && "$remote" != "$upstream" ]]; then
+      printf '%s\n' "$remote"
+      return 0
+    fi
+  fi
+  if git remote get-url origin >/dev/null 2>&1; then
+    printf 'origin\n'
+    return 0
+  fi
+  remotes="$(git remote 2>/dev/null | sort)"
+  if [[ -z "$remotes" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$remotes" | head -n1
+}
+
 # -- repo identity helpers -------------------------------------------------
 
 # {owner}/{repo} for the current GitHub remote. Per-call; do not cache across
