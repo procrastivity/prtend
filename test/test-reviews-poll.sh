@@ -104,10 +104,10 @@ case_once_one_batch() {
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
     # 1002's thread has a marker-bearing reply (posted by a prior note-post);
     # 1001's thread is unhandled.
-    _prtend_forge_gh_review_thread_bodies() {
+    _prtend_forge_gh_review_thread_notes() {
       local id="$2"
-      if [[ "$id" == "1002" ]]; then cat "$FIXTURES/thread_bodies.handled.txt"
-      else cat "$FIXTURES/thread_bodies.unhandled.txt"; fi
+      if [[ "$id" == "1002" ]]; then cat "$FIXTURES/thread_notes.handled.json"
+      else cat "$FIXTURES/thread_notes.unhandled.json"; fi
     }
     prtend_state_set_cursor 7 "5" >/dev/null
     out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
@@ -142,7 +142,7 @@ case_once_two_batches() {
       if [[ "$batch_id" == "100" ]]; then cat "$FIXTURES/review_comments.batch_a.json"
       else cat "$FIXTURES/review_comments.batch_b.json"; fi
     }
-    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_notes() { cat "$FIXTURES/thread_notes.unhandled.json"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
@@ -171,7 +171,7 @@ case_once_explicit_cursor() {
     _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
     _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.one_batch.json"; }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
-    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_notes() { cat "$FIXTURES/thread_notes.unhandled.json"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --once --cursor abc 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
@@ -197,7 +197,7 @@ case_block_then_batch() {
       else cat "$FIXTURES/reviews_since.one_batch.json"; fi
     }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
-    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_notes() { cat "$FIXTURES/thread_notes.unhandled.json"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --block 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
@@ -340,10 +340,10 @@ case_already_handled_thread_walk() {
     # Both projected comment ids resolve to a thread with a marker-bearing
     # reply. Count calls per id to verify the per-batch cache.
     fetches="$SANDBOX/fetches"; : > "$fetches"
-    _prtend_forge_gh_review_thread_bodies() {
+    _prtend_forge_gh_review_thread_notes() {
       local id="$2"
       printf '%s\n' "$id" >> "$fetches"
-      cat "$FIXTURES/thread_bodies.handled.txt"
+      cat "$FIXTURES/thread_notes.handled.json"
     }
     out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
     rc=$?
@@ -376,7 +376,7 @@ case_thread_bodies_hard_failure() {
     _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
     _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.one_batch.json"; }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
-    _prtend_forge_gh_review_thread_bodies() { return 2; }
+    _prtend_forge_gh_review_thread_notes() { return 2; }
     out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
     rc=$?
     assert_eq "exit code propagated" 2 "$rc"
@@ -407,12 +407,45 @@ case_block_timeout_no_late_emit() {
       else cat "$FIXTURES/reviews_since.one_batch.json"; fi
     }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
-    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_notes() { cat "$FIXTURES/thread_notes.unhandled.json"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --block --timeout 1 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
     assert_eq "no late event" "" "$out"
     assert_eq "cursor not advanced" "" "$(prtend_state_get_cursor 7)"
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 14b — A fresh human follow-up in an already-handled thread must
+# surface with already_handled=false. The thread contains an old prtend
+# marker reply (2026-03-01), but the projected comment is a new
+# follow-up posted after the marker (2026-04-01). The skill skips
+# already_handled=true comments per docs/skill-prompts.md:121, so
+# mis-flagging the follow-up would silently drop the documented edge
+# case (docs/overview.md item 11).
+# ----------------------------------------------------------------------------
+case_followup_after_marker_not_handled() {
+  echo "case: follow-up after marker is NOT already_handled"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
+    _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.followup_batch.json"; }
+    _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.followup_batch.json"; }
+    # The thread contains the original comment, a marker-bearing prtend
+    # reply, AND the new follow-up. Pre-time-filter semantics would call
+    # this "handled" (marker is in the thread); the new semantics
+    # restrict to notes posted *after* the projected comment's
+    # created_at, so the marker (older than the follow-up) doesn't count.
+    _prtend_forge_gh_review_thread_notes() { cat "$FIXTURES/thread_notes.followup.json"; }
+    out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 0 "$rc"
+    assert_eq "follow-up surfaced" '"5001"' "$(jq -c '.comments[0].comment_id' <<<"$out")"
+    assert_eq "follow-up not handled" 'false' \
+      "$(jq -c '.comments[0].already_handled' <<<"$out")"
   )
 }
 
@@ -435,7 +468,7 @@ case_block_emits_one_of_many() {
       if [[ "$batch_id" == "100" ]]; then cat "$FIXTURES/review_comments.batch_a.json"
       else cat "$FIXTURES/review_comments.batch_b.json"; fi
     }
-    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_notes() { cat "$FIXTURES/thread_notes.unhandled.json"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --block 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
@@ -677,6 +710,7 @@ case_anchor_stale_combinations
 case_already_handled_thread_walk
 case_thread_bodies_hard_failure
 case_block_timeout_no_late_emit
+case_followup_after_marker_not_handled
 
 PASS="$(grep -c '^P' "$RESULTS" || true)"
 FAIL="$(grep -c '^F' "$RESULTS" || true)"

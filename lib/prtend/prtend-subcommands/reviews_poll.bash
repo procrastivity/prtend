@@ -249,7 +249,7 @@ _reviews_poll_emit_pending() {
 
       _reviews_poll_anchor_stale "$c_path" "$c_line"
       anchor_stale="$_PRTEND_REVIEWS_POLL_RET"
-      _reviews_poll_already_handled "$pr" "$comment_id" || return $?
+      _reviews_poll_already_handled "$pr" "$comment_id" "$c_created" || return $?
       already_handled="$_PRTEND_REVIEWS_POLL_RET"
 
       if [[ "$c_line" == "null" || -z "$c_line" ]]; then
@@ -340,43 +340,63 @@ _reviews_poll_anchor_stale() {
   fi
 }
 
-# Fetches the comment's thread (root + replies for GitHub review comments;
-# all notes in the discussion for GitLab) via `prtend_forge_review_thread_bodies`
-# and sets RET=true if any body in that thread carries a prtend marker.
-# The marker lives in the *reply* posted by `note-post`, not in the
-# reviewer's original anchored comment — so walking the batch's sibling
-# `comment_ids` would miss it. Mirrors note-post's idempotency probe.
-# Per-batch cache (`body_cache` in caller, keyed by comment_id) dedupes
-# fetches when two projected comments resolve to the same thread.
+# Sets RET=true if a prtend marker appears on any note in this comment's
+# thread that was posted *after* the comment itself. Using "after this
+# comment's created_at" (rather than "anywhere in the thread") is what
+# distinguishes a fresh human follow-up from a long-handled thread: the
+# original request comment is "handled" by a later marker-bearing reply,
+# but a *new* follow-up posted after that reply is NOT yet handled (the
+# marker predates it). Without this time-filter, the documented
+# follow-up edge case (`docs/overview.md` § "Edge cases" item 11) would
+# surface the new note with `already_handled:true` and the skill would
+# silently drop it.
+#
+# Uses `prtend_forge_review_thread_notes` for the per-note timestamps
+# `note-post` doesn't need. Cache keyed by the comment_id (different
+# projected comments on the same thread legitimately yield different
+# answers because their `created_at` differs).
 _reviews_poll_already_handled() {
-  local pr="$1" comment_id="$2"
-  local thread_bodies probe_rc
+  local pr="$1" comment_id="$2" comment_created="$3"
+  local notes_json probe_rc handled
   if [[ -n "${body_cache[$comment_id]+set}" ]]; then
-    thread_bodies="${body_cache[$comment_id]}"
-  else
-    probe_rc=0
-    thread_bodies="$(prtend_forge_review_thread_bodies "$pr" "$comment_id" 2>/dev/null)" \
-      || probe_rc=$?
-    case "$probe_rc" in
-      0)
-        : ;;
-      1)
-        # Documented "id unknown" — shouldn't happen for an id we just got
-        # from `review_comments`, but if it does, treat the thread as empty
-        # and let the downstream rubric escalate.
-        thread_bodies="" ;;
-      *)
-        # Network, auth, or other API failure. Do NOT downgrade to "not
-        # handled" — that would let a watch loop double-post on a thread
-        # that's already been replied to. Propagate so the caller aborts
-        # this poll cycle (no partial cursor advance per Key decisions).
-        return "$probe_rc" ;;
-    esac
-    body_cache[$comment_id]="$thread_bodies"
+    _PRTEND_REVIEWS_POLL_RET="${body_cache[$comment_id]}"
+    return 0
   fi
-  if prtend_note_is_handled "$thread_bodies"; then
-    _PRTEND_REVIEWS_POLL_RET=true
-  else
-    _PRTEND_REVIEWS_POLL_RET=false
-  fi
+  probe_rc=0
+  notes_json="$(prtend_forge_review_thread_notes "$pr" "$comment_id" 2>/dev/null)" \
+    || probe_rc=$?
+  case "$probe_rc" in
+    0) : ;;
+    1)
+      # Documented "id unknown" — shouldn't happen for an id we just got
+      # from `review_comments`, but if it does, treat the thread as empty
+      # and let the downstream rubric escalate.
+      notes_json='{"notes":[]}' ;;
+    *)
+      # Network, auth, or other API failure. Do NOT downgrade to "not
+      # handled" — that would let a watch loop double-post on a thread
+      # that's already been replied to. Propagate so the caller aborts
+      # this poll cycle.
+      return "$probe_rc" ;;
+  esac
+
+  # Marker-bearing replies posted *strictly after* this comment count as
+  # handling it. Pre-filter to notes with `created_at > $comment_created`
+  # in jq, then grep each body via `prtend_note_is_handled`.
+  handled=false
+  local later_bodies n k body
+  later_bodies="$(printf '%s' "$notes_json" | jq -c \
+    --arg created "$comment_created" \
+    '[ .notes[]? | select(.created_at > $created) | .body ]')"
+  n="$(printf '%s' "$later_bodies" | jq 'length')"
+  for ((k=0; k<n; k++)); do
+    body="$(printf '%s' "$later_bodies" | jq -r ".[$k]")"
+    if prtend_note_is_handled "$body"; then
+      handled=true
+      break
+    fi
+  done
+
+  body_cache[$comment_id]="$handled"
+  _PRTEND_REVIEWS_POLL_RET="$handled"
 }

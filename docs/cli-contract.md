@@ -305,7 +305,7 @@ One JSON object per review batch:
 |---|---|
 | `review_state` | `"changes_requested"` \| `"approved"` \| `"commented"` |
 | `comments[].anchor_stale` | True when the comment's line no longer exists in current HEAD |
-| `comments[].already_handled` | True when prtend's marker is present in an existing reply on this comment's thread |
+| `comments[].already_handled` | True when prtend's marker appears on a reply posted *after* this comment's `created_at`. The time-filter is what distinguishes a previously-replied request comment ("handled") from a fresh human follow-up in the same thread ("not yet handled"). |
 | `next_cursor` | The cursor to pass on the next call (already written to state if `--cursor` was omitted) |
 
 ### Exit codes

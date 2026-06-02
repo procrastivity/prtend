@@ -850,6 +850,62 @@ _prtend_forge_gl_review_thread_bodies() {
   printf '%s' "$discussion" | jq -r '[.notes[]? | (.body // "")] | join("\n")'
 }
 
+# -- review_thread_notes ---------------------------------------------------
+
+# Like `review_thread_bodies`, but emits per-note objects so callers can
+# answer time-sensitive questions like "is there a prtend marker on a
+# reply posted *after* this comment?" `note-post` doesn't need the
+# timestamps (it just wants any-marker-in-thread to refuse a double-post)
+# and stays on `review_thread_bodies`; `reviews-poll` uses this one to
+# avoid false-positive `already_handled` flags on fresh follow-ups in
+# already-replied threads (`docs/overview.md` § "Edge cases" item 11).
+#
+# Returns `{notes: [{id, created_at, body}, ...]}` on hit, exit 1 + empty
+# if the comment id is unknown.
+prtend_forge_review_thread_notes() {
+  prtend_forge_dispatch review_thread_notes "$@"
+}
+
+_prtend_forge_gh_review_thread_notes() {
+  local pr="${1:-}" comment_id="${2:-}" slug all
+  if [[ -z "$pr" || -z "$comment_id" ]]; then
+    prtend_log_error "review_thread_notes: missing pr or comment-id argument"; return 2
+  fi
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  all="$(gh api "repos/${slug}/pulls/${pr}/comments" --paginate | jq -s 'add // []')" || return $?
+  if [[ "$(printf '%s' "$all" | jq --arg cid "$comment_id" \
+        '[.[] | select((.id|tostring) == $cid)] | length')" == "0" ]]; then
+    return 1
+  fi
+  printf '%s' "$all" | jq -c --arg cid "$comment_id" '
+    (map(select((.id|tostring) == $cid))[0]) as $target
+    | (($target.in_reply_to_id // $target.id) | tostring) as $root
+    | { notes: [ .[]
+          | select((.id|tostring) == $root or ((.in_reply_to_id // "") | tostring) == $root)
+          | { id: (.id | tostring), created_at: (.created_at // ""), body: (.body // "") }
+        ] }'
+}
+
+_prtend_forge_gl_review_thread_notes() {
+  local pr="${1:-}" comment_id="${2:-}" project_id discussion
+  if [[ -z "$pr" || -z "$comment_id" ]]; then
+    prtend_log_error "review_thread_notes: missing pr or comment-id argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  discussion="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate \
+    | jq -s --arg cid "$comment_id" '
+        add // []
+        | map(select(any(.notes[]?; (.id|tostring) == $cid)))
+        | first // null')" || return $?
+  if [[ -z "$discussion" || "$discussion" == "null" ]]; then
+    return 1
+  fi
+  printf '%s' "$discussion" | jq -c '
+    { notes: [ .notes[]?
+        | { id: (.id | tostring), created_at: (.created_at // ""), body: (.body // "") }
+      ] }'
+}
+
 # -- pr_create -------------------------------------------------------------
 
 prtend_forge_pr_create() {
