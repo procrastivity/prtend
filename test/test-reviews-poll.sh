@@ -121,8 +121,8 @@ case_once_one_batch() {
     assert_eq "comments[0].anchor_stale"    'true'         "$(jq -c '.comments[0].anchor_stale' <<<"$out")"
     assert_eq "comments[1].anchor_stale"    'false'        "$(jq -c '.comments[1].anchor_stale' <<<"$out")"
     assert_eq "comments[1].already_handled" 'true'         "$(jq -c '.comments[1].already_handled' <<<"$out")"
-    assert_eq "next_cursor"        '"100"'                 "$(jq -c .next_cursor <<<"$out")"
-    assert_eq "cursor written"     '100'                   "$(prtend_state_get_cursor 7)"
+    assert_eq "next_cursor"        '"2026-01-01T00:00:00Z|100"' "$(jq -c .next_cursor <<<"$out")"
+    assert_eq "cursor written"     '2026-01-01T00:00:00Z|100'   "$(prtend_state_get_cursor 7)"
   )
 }
 
@@ -153,9 +153,9 @@ case_once_two_batches() {
     # Per-event next_cursor is each batch's own resume_cursor, not the
     # across-call max — a consumer that drops the second event can still
     # resume from the first event's next_cursor and pick up batch 200 next.
-    assert_eq "first next_cursor"  '"100"' "$(printf '%s\n' "$out" | sed -n 1p | jq -c .next_cursor)"
-    assert_eq "second next_cursor" '"200"' "$(printf '%s\n' "$out" | sed -n 2p | jq -c .next_cursor)"
-    assert_eq "cursor written" '200' "$(prtend_state_get_cursor 7)"
+    assert_eq "first next_cursor"  '"2026-01-01T00:00:00Z|100"' "$(printf '%s\n' "$out" | sed -n 1p | jq -c .next_cursor)"
+    assert_eq "second next_cursor" '"2026-01-02T00:00:00Z|200"' "$(printf '%s\n' "$out" | sed -n 2p | jq -c .next_cursor)"
+    assert_eq "cursor written" '2026-01-02T00:00:00Z|200' "$(prtend_state_get_cursor 7)"
   )
 }
 
@@ -202,7 +202,7 @@ case_block_then_batch() {
     rc=$?
     assert_eq "exit code" 0 "$rc"
     assert_eq "batch_id" '"100"' "$(jq -c .batch_id <<<"$out")"
-    assert_eq "cursor written" '100' "$(prtend_state_get_cursor 7)"
+    assert_eq "cursor written" '2026-01-01T00:00:00Z|100' "$(prtend_state_get_cursor 7)"
   )
 }
 
@@ -441,30 +441,29 @@ case_block_emits_one_of_many() {
     assert_eq "exit code" 0 "$rc"
     assert_eq "event count" 1 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
     assert_eq "emitted first batch" '"100"' "$(jq -c .batch_id <<<"$out")"
-    assert_eq "event next_cursor"   '"100"' "$(jq -c .next_cursor <<<"$out")"
+    assert_eq "event next_cursor"   '"2026-01-01T00:00:00Z|100"' "$(jq -c .next_cursor <<<"$out")"
     # Cursor advanced past batch 100 only — batch 200 is left for next call.
-    assert_eq "state cursor"        '100'   "$(prtend_state_get_cursor 7)"
+    assert_eq "state cursor"        '2026-01-01T00:00:00Z|100'   "$(prtend_state_get_cursor 7)"
   )
 }
 
 # ----------------------------------------------------------------------------
-# Case 16 — GitHub forge: reviews_since must sort by .id, not .submitted_at,
-# so that the per-batch resume_cursor (= review id) is monotonic with
-# emission order. A draft review created before but submitted after a
-# later-created review must NOT be skipped on the next call.
+# Case 16 — GitHub forge: cursor is (submitted_at, id), NOT id alone.
+# Emission order is by submitted_at then id; the across-call next_cursor is
+# the last batch's compound resume_cursor. id-only cursoring would lose a
+# late-submitted lower-id draft (see case 16b).
 # ----------------------------------------------------------------------------
 case_gh_reviews_since_id_order() {
-  echo "case: gh reviews_since sorts by id"
+  echo "case: gh reviews_since uses (submitted_at, id) cursor"
   (
     new_sandbox
     cd "$SANDBOX" || exit
     load_libs
-    # Two reviews on the same PR. id=100 was drafted earlier and submitted
-    # LATER (later submitted_at); id=200 was submitted first.
+    # Two reviews: id=200 submitted Monday (earliest), id=100 submitted
+    # Tuesday (lower id, later submission). The new compound cursor must
+    # emit id=200 first (earliest submitted_at) and write a cursor that
+    # still admits id=100 on the next call.
     _prtend_forge_gh_repo_slug() { echo "o/r"; }
-    # Pretend gh api returns these two reviews; the comments endpoint
-    # returns empty for each. We intercept the gh wrapper used by
-    # _prtend_forge_gh_reviews_since.
     gh() {
       case "$*" in
         *"/reviews "*|*"/reviews"*)
@@ -481,13 +480,60 @@ JSON
         *) echo "unexpected gh args: $*" >&2; return 1 ;;
       esac
     }
-    out="$(_prtend_forge_gh_reviews_since 7 0)"
-    # Emission order must be id-ascending: 100 first, then 200.
-    assert_eq "first batch_id"     '"100"' "$(jq -c '.batches[0].batch_id' <<<"$out")"
-    assert_eq "second batch_id"    '"200"' "$(jq -c '.batches[1].batch_id' <<<"$out")"
-    assert_eq "first resume_cursor"  '"100"' "$(jq -c '.batches[0].resume_cursor' <<<"$out")"
-    assert_eq "second resume_cursor" '"200"' "$(jq -c '.batches[1].resume_cursor' <<<"$out")"
-    assert_eq "across-call next_cursor" '"200"' "$(jq -c '.next_cursor' <<<"$out")"
+    out="$(_prtend_forge_gh_reviews_since 7 "")"
+    # Emission order is submitted_at ascending: 200 (Mon) before 100 (Tue).
+    assert_eq "first batch_id"     '"200"' "$(jq -c '.batches[0].batch_id' <<<"$out")"
+    assert_eq "second batch_id"    '"100"' "$(jq -c '.batches[1].batch_id' <<<"$out")"
+    assert_eq "first resume_cursor"  '"2026-01-01T00:00:00Z|200"' "$(jq -c '.batches[0].resume_cursor' <<<"$out")"
+    assert_eq "second resume_cursor" '"2026-01-02T00:00:00Z|100"' "$(jq -c '.batches[1].resume_cursor' <<<"$out")"
+    assert_eq "across-call next_cursor" '"2026-01-02T00:00:00Z|100"' "$(jq -c '.next_cursor' <<<"$out")"
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 16b — GitHub late-submitted draft: id=100 was drafted before id=200
+# but its `submitted_at` arrives AFTER prtend has already processed id=200.
+# The id-only cursor model would skip id=100 forever (`.id > 200` filters
+# it out). The compound cursor must include it on the next call.
+# ----------------------------------------------------------------------------
+case_gh_reviews_since_late_draft() {
+  echo "case: gh late-submitted draft is not skipped"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    _prtend_forge_gh_repo_slug() { echo "o/r"; }
+    # First call: only id=200 exists in the API (the draft hasn't been
+    # submitted yet, so the reviews endpoint doesn't surface it).
+    state_file="$SANDBOX/gh-state"; printf '1' > "$state_file"
+    gh() {
+      local n; n="$(cat "$state_file")"
+      case "$*" in
+        *"/reviews/"*"/comments"*) echo '[]' ;;
+        *"/reviews"*)
+          if [[ "$n" == "1" ]]; then
+            echo '[{"id":200,"submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"},"state":"COMMENTED"}]'
+          else
+            cat <<'JSON'
+[
+  {"id":200,"submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"},"state":"COMMENTED"},
+  {"id":100,"submitted_at":"2026-01-02T00:00:00Z","user":{"login":"bob"},"state":"APPROVED"}
+]
+JSON
+          fi ;;
+        *) return 1 ;;
+      esac
+    }
+    out1="$(_prtend_forge_gh_reviews_since 7 "")"
+    first_cursor="$(jq -r .next_cursor <<<"$out1")"
+    assert_eq "first call cursor" '2026-01-01T00:00:00Z|200' "$first_cursor"
+    # Now the draft (id=100) gets submitted and appears in the API. Feed
+    # the previous cursor back. With id-only cursoring, id=100 would be
+    # filtered out (.id > 200). With (submitted_at, id), it must appear.
+    printf '2' > "$state_file"
+    out2="$(_prtend_forge_gh_reviews_since 7 "$first_cursor")"
+    assert_eq "second call sees the late draft" 1 "$(jq -c '.batches | length' <<<"$out2")"
+    assert_eq "late-draft batch_id" '"100"' "$(jq -c '.batches[0].batch_id' <<<"$out2")"
   )
 }
 
@@ -531,6 +577,7 @@ JSON
 }
 
 case_gh_reviews_since_id_order
+case_gh_reviews_since_late_draft
 case_gl_reviews_since_fractional_cursor
 case_block_emits_one_of_many
 case_once_empty

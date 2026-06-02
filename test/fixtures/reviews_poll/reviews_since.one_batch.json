@@ -1,1 +1,1 @@
-{"batches":[{"batch_id":"100","submitted_at":"2026-01-01T00:00:00Z","author":"reviewer","state":"changes_requested","comment_ids":["1001","1002","1003"],"resume_cursor":"100"}],"next_cursor":"100"}
+{"batches":[{"batch_id":"100","submitted_at":"2026-01-01T00:00:00Z","author":"reviewer","state":"changes_requested","comment_ids":["1001","1002","1003"],"resume_cursor":"2026-01-01T00:00:00Z|100"}],"next_cursor":"2026-01-01T00:00:00Z|100"}

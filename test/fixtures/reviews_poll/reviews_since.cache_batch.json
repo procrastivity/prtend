@@ -1,1 +1,1 @@
-{"batches":[{"batch_id":"300","submitted_at":"2026-01-03T00:00:00Z","author":"alice","state":"commented","comment_ids":["3001","3002","3003","3999"],"resume_cursor":"300"}],"next_cursor":"300"}
+{"batches":[{"batch_id":"300","submitted_at":"2026-01-03T00:00:00Z","author":"alice","state":"commented","comment_ids":["3001","3002","3003","3999"],"resume_cursor":"2026-01-03T00:00:00Z|300"}],"next_cursor":"2026-01-03T00:00:00Z|300"}

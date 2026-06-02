@@ -479,29 +479,45 @@ prtend_forge_reviews_since() {
 _prtend_forge_gh_reviews_since() {
   local pr="${1:-}" cursor="${2:-}" slug reviews_json filtered count i
   local review_id submitted_at author state comments_json comment_ids batch
-  local batches max_id
+  local batches batch_resume_cursor next_cursor cur_ts cur_id
   if [[ -z "$pr" ]]; then
     prtend_log_error "reviews_since: missing pr argument"; return 2
   fi
-  [[ -z "$cursor" ]] && cursor=0
   slug="$(_prtend_forge_gh_repo_slug)" || return $?
+
+  # Cursor wire format: "<submitted_at>|<id>". A review-id-only cursor
+  # would lose lower-id pending drafts that get submitted *after* a
+  # higher-id review is processed: GitHub assigns ids at draft creation,
+  # not at submission, so a draft with id=100 created before id=200 may
+  # show up in the API only later, with `.id > 200_cursor` filtering it
+  # out forever. The pair `(submitted_at, id)` is monotonic in submission
+  # order (id is the tie-breaker for same-instant submissions), which is
+  # the order downstream consumers care about anyway.
+  if [[ -n "$cursor" && "$cursor" == *"|"* ]]; then
+    cur_ts="${cursor%|*}"
+    cur_id="${cursor##*|}"
+  else
+    cur_ts=""
+    cur_id=0
+  fi
+
   # `gh api --paginate` on a JSON-array endpoint usually merges pages, but
   # older versions and some endpoints emit one concatenated array per page.
   # Defensively slurp+flatten so the downstream jq filter sees one array.
   reviews_json="$(gh api "repos/${slug}/pulls/${pr}/reviews" --paginate | jq -s 'add // []')" || return $?
 
-  # Sort by .id, NOT .submitted_at: the cursor IS a review id, and the
-  # downstream `.id > $cur` filter requires the per-batch resume_cursor
-  # (which is the id) to be monotonic with emission order. A reviewer who
-  # drafts a review early and submits it later can produce a row where
-  # `submitted_at` order disagrees with `id` order; sorting by `submitted_at`
-  # would emit the higher-id first under `--block`, advance the cursor
-  # past it, and silently drop the lower-id review on the next call.
-  filtered="$(printf '%s' "$reviews_json" | jq -c --argjson cur "$cursor" '
-    [ .[] | select(.id > $cur) ] | sort_by(.id)')"
+  filtered="$(printf '%s' "$reviews_json" | jq -c \
+    --arg cur_ts "$cur_ts" --argjson cur_id "$cur_id" '
+    [ .[]
+      | select(.submitted_at != null)
+      | select(
+          (.submitted_at > $cur_ts)
+          or (.submitted_at == $cur_ts and .id > $cur_id)
+        )
+    ] | sort_by(.submitted_at, .id)')"
   count="$(printf '%s' "$filtered" | jq 'length')"
   batches='[]'
-  max_id="$cursor"
+  next_cursor="$cursor"
   for ((i=0; i<count; i++)); do
     review_id="$(printf '%s' "$filtered" | jq -r ".[$i].id")"
     submitted_at="$(printf '%s' "$filtered" | jq -r ".[$i].submitted_at // \"\"")"
@@ -514,22 +530,24 @@ _prtend_forge_gh_reviews_since() {
     # Propagate per-review comments errors; spec says don't swallow forge failures.
     comments_json="$(gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate | jq -s 'add // []')" || return $?
     comment_ids="$(printf '%s' "$comments_json" | jq '[ .[] | (.id | tostring) ]')"
-    # `resume_cursor` is the per-batch resume token — the cursor value the
-    # *next* call should pass to skip past this batch alone. For GitHub
-    # that's the review id (cursors are review ids). The subcommand uses it
-    # when `--block` emits a single batch out of N pending: it must advance
-    # state past just the emitted batch, not past every batch the call
-    # observed.
+    # `resume_cursor` is the per-batch resume token — the compound
+    # "submitted_at|id" pair the *next* call should pass to skip past this
+    # batch alone. The subcommand uses it when `--block` emits one batch
+    # out of N pending: state advances past just that one batch.
+    batch_resume_cursor="${submitted_at}|${review_id}"
     batch="$(jq -nc \
       --arg id "$review_id" --arg sa "$submitted_at" \
       --arg au "$author" --arg st "$state" \
       --argjson cids "$comment_ids" \
+      --arg rc "$batch_resume_cursor" \
       '{batch_id: $id, submitted_at: $sa, author: $au, state: $st,
-        comment_ids: $cids, resume_cursor: $id}')"
+        comment_ids: $cids, resume_cursor: $rc}')"
     batches="$(printf '%s' "$batches" | jq -c --argjson b "$batch" '. + [$b]')"
-    if (( review_id > max_id )); then max_id="$review_id"; fi
+    # Batches are emission-sorted (submitted_at, id) ascending, so the
+    # last batch's resume_cursor is the across-call next_cursor.
+    next_cursor="$batch_resume_cursor"
   done
-  jq -nc --argjson batches "$batches" --arg cursor "$max_id" \
+  jq -nc --argjson batches "$batches" --arg cursor "$next_cursor" \
     '{batches: $batches, next_cursor: $cursor}'
 }
 
