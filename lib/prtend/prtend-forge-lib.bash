@@ -479,22 +479,59 @@ prtend_forge_reviews_since() {
 _prtend_forge_gh_reviews_since() {
   local pr="${1:-}" cursor="${2:-}" slug reviews_json filtered count i
   local review_id submitted_at author state comments_json comment_ids batch
-  local batches max_id
+  local batches batch_resume_cursor next_cursor cur_ts cur_id legacy
   if [[ -z "$pr" ]]; then
     prtend_log_error "reviews_since: missing pr argument"; return 2
   fi
-  [[ -z "$cursor" ]] && cursor=0
   slug="$(_prtend_forge_gh_repo_slug)" || return $?
+
+  # Cursor wire format: "<submitted_at>|<id>". A review-id-only cursor
+  # would lose lower-id pending drafts that get submitted *after* a
+  # higher-id review is processed: GitHub assigns ids at draft creation,
+  # not at submission, so a draft with id=100 created before id=200 may
+  # show up in the API only later, with `.id > 200_cursor` filtering it
+  # out forever. The pair `(submitted_at, id)` is monotonic in submission
+  # order (id is the tie-breaker for same-instant submissions).
+  #
+  # Backward compatibility: an earlier version (and the original docs)
+  # documented the cursor as just the last seen review id. A bare numeric
+  # cursor coming from an existing state file or an explicit `--cursor 200`
+  # call is interpreted under the legacy id-only semantic (`.id > $cur_id`)
+  # so it doesn't silently re-emit every review; the next emission writes
+  # the new compound form, self-healing the state file.
+  legacy=0
+  if [[ -z "$cursor" ]]; then
+    cur_ts=""; cur_id=0
+  elif [[ "$cursor" == *"|"* ]]; then
+    cur_ts="${cursor%|*}"
+    cur_id="${cursor##*|}"
+  elif [[ "$cursor" =~ ^[0-9]+$ ]]; then
+    cur_ts=""; cur_id="$cursor"; legacy=1
+  else
+    # Malformed: treat as "from the beginning" rather than fail closed —
+    # the forge contract doesn't validate cursor strings.
+    cur_ts=""; cur_id=0
+  fi
+
   # `gh api --paginate` on a JSON-array endpoint usually merges pages, but
   # older versions and some endpoints emit one concatenated array per page.
   # Defensively slurp+flatten so the downstream jq filter sees one array.
   reviews_json="$(gh api "repos/${slug}/pulls/${pr}/reviews" --paginate | jq -s 'add // []')" || return $?
 
-  filtered="$(printf '%s' "$reviews_json" | jq -c --argjson cur "$cursor" '
-    [ .[] | select(.id > $cur) ] | sort_by(.submitted_at)')"
+  filtered="$(printf '%s' "$reviews_json" | jq -c \
+    --arg cur_ts "$cur_ts" --argjson cur_id "$cur_id" --argjson legacy "$legacy" '
+    [ .[]
+      | select(.submitted_at != null)
+      | select(
+          if $legacy == 1 then .id > $cur_id
+          else (.submitted_at > $cur_ts)
+               or (.submitted_at == $cur_ts and .id > $cur_id)
+          end
+        )
+    ] | sort_by(.submitted_at, .id)')"
   count="$(printf '%s' "$filtered" | jq 'length')"
   batches='[]'
-  max_id="$cursor"
+  next_cursor="$cursor"
   for ((i=0; i<count; i++)); do
     review_id="$(printf '%s' "$filtered" | jq -r ".[$i].id")"
     submitted_at="$(printf '%s' "$filtered" | jq -r ".[$i].submitted_at // \"\"")"
@@ -507,15 +544,24 @@ _prtend_forge_gh_reviews_since() {
     # Propagate per-review comments errors; spec says don't swallow forge failures.
     comments_json="$(gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate | jq -s 'add // []')" || return $?
     comment_ids="$(printf '%s' "$comments_json" | jq '[ .[] | (.id | tostring) ]')"
+    # `resume_cursor` is the per-batch resume token — the compound
+    # "submitted_at|id" pair the *next* call should pass to skip past this
+    # batch alone. The subcommand uses it when `--block` emits one batch
+    # out of N pending: state advances past just that one batch.
+    batch_resume_cursor="${submitted_at}|${review_id}"
     batch="$(jq -nc \
       --arg id "$review_id" --arg sa "$submitted_at" \
       --arg au "$author" --arg st "$state" \
       --argjson cids "$comment_ids" \
-      '{batch_id: $id, submitted_at: $sa, author: $au, state: $st, comment_ids: $cids}')"
+      --arg rc "$batch_resume_cursor" \
+      '{batch_id: $id, submitted_at: $sa, author: $au, state: $st,
+        comment_ids: $cids, resume_cursor: $rc}')"
     batches="$(printf '%s' "$batches" | jq -c --argjson b "$batch" '. + [$b]')"
-    if (( review_id > max_id )); then max_id="$review_id"; fi
+    # Batches are emission-sorted (submitted_at, id) ascending, so the
+    # last batch's resume_cursor is the across-call next_cursor.
+    next_cursor="$batch_resume_cursor"
   done
-  jq -nc --argjson batches "$batches" --arg cursor "$max_id" \
+  jq -nc --argjson batches "$batches" --arg cursor "$next_cursor" \
     '{batches: $batches, next_cursor: $cursor}'
 }
 
@@ -538,7 +584,7 @@ _prtend_forge_gl_discussion_settled() {
 # than the cursor, and (b) the latest note is older than now - PRTEND_QUIET_WINDOW.
 _prtend_forge_gl_reviews_since() {
   local pr="${1:-}" cursor="${2:-}" project_id quiet_window now
-  local discussions_json filtered batches next_cursor cursor_epoch
+  local discussions_json filtered batches next_cursor
   if [[ -z "$pr" ]]; then
     prtend_log_error "reviews_since: missing pr argument"; return 2
   fi
@@ -546,40 +592,62 @@ _prtend_forge_gl_reviews_since() {
   quiet_window="${PRTEND_QUIET_WINDOW:-60}"
   now="$(date -u +%s)"
 
-  cursor_epoch=0
-  if [[ -n "$cursor" ]]; then
-    cursor_epoch="$(_prtend_iso_to_epoch "$cursor" 2>/dev/null || echo 0)"
-  fi
-
   discussions_json="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate)" || return $?
 
-  # GitLab timestamps include fractional seconds (e.g. `...46.176Z`), which
-  # jq's `fromdateiso8601` rejects in jq 1.6. Strip the fractional portion
-  # before parsing. Sort by max-note time (the settling time) per spec —
-  # `submitted_at` is the earliest note and isn't a stable batch order key.
+  # GitLab created_at strings include fractional seconds (e.g. `...46.176Z`).
+  # We MUST preserve that precision in the cursor: two discussions whose
+  # latest notes fall in the same whole second are common enough that a
+  # second-precision cursor (the original implementation truncated via
+  # `fromdateiso8601`) would advance past one and silently swallow the
+  # others under `--block` (the next `all($times[]; . > $cur)` would
+  # exclude any note at the same second). Compare ISO strings directly,
+  # after normalizing to a canonical width — the only catch is that
+  # backward-compat cursors written by an older version (or by the user)
+  # might omit the fractional portion, so we pad to `.000Z`. Lex order on
+  # the normalized form matches temporal order.
   filtered="$(printf '%s' "$discussions_json" | jq -s 'add // []' | jq -c \
-    --argjson cur "$cursor_epoch" --argjson now "$now" --argjson qw "$quiet_window" '
-    def to_epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
-    [ .[]
+    --arg cur "$cursor" --argjson now "$now" --argjson qw "$quiet_window" '
+    def norm_iso:
+      if test("\\.[0-9]+Z$") then . else sub("Z$"; ".000Z") end;
+    def to_epoch_f:
+      capture("^(?<sec>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?<frac>\\.\\d+)?Z$") as $m
+      | ($m.sec + "Z" | fromdateiso8601) + (($m.frac // "0") | tonumber);
+    ($cur | if . == "" then "" else norm_iso end) as $cur_n
+    | [ .[]
       | . as $d
-      | ([ .notes[]? | select((.system // false) | not) | (.created_at | to_epoch) ]) as $times
-      | select(($times | length) > 0)
-      | select(all($times[]; . > $cur))
-      | select(($times | max) <= ($now - $qw))
+      | ([ .notes[]? | select((.system // false) | not) ]) as $all_notes
+      | ($all_notes | map(.created_at | norm_iso)) as $all_times
+      | ($all_notes | map(select((.created_at | norm_iso) > $cur_n))) as $new_notes
+      # Emit when ANY note is newer than the cursor — a discussion that
+      # already settled past the cursor can still receive a fresh human
+      # follow-up note, which is the case `overview.md` § "Edge cases"
+      # item 11 ("New comment on a thread after Accept") explicitly
+      # promises to surface. Requiring all notes > cursor would drop the
+      # re-emission silently.
+      | select(($new_notes | length) > 0)
+      | ($all_times | max) as $_max_t
+      | select(($_max_t | to_epoch_f) <= ($now - $qw))
+      # Batch metadata is computed from the *new* notes. comment_ids is
+      # restricted to the new subset so the subcommand projection emits
+      # only fresh notes (old ones were already emitted on a prior call).
       | {
           batch_id:     (.id | tostring),
-          submitted_at: ([ .notes[]? | select((.system // false) | not) | .created_at ] | min // ""),
-          author:       (first(.notes[]? | select((.system // false) | not) | .author.username) // ""),
+          submitted_at: ($new_notes | map(.created_at | norm_iso) | min),
+          author:       ($new_notes[0].author.username // ""),
           state:        "commented",
-          comment_ids:  [ .notes[]? | select((.system // false) | not) | (.id | tostring) ],
-          _max_t:       ($times | max)
+          comment_ids:  ($new_notes | map(.id | tostring)),
+          _max_t:       $_max_t
         }
     ] | sort_by(._max_t)')"
 
-  batches="$(printf '%s' "$filtered" | jq -c '[ .[] | del(._max_t) ]')"
+  # `resume_cursor` is the per-batch resume token — the normalized ISO max
+  # settled-note timestamp for the batch (with `.NNN` fractional preserved).
+  # The across-call `next_cursor` is the lex-max of per-batch resume_cursors.
+  batches="$(printf '%s' "$filtered" | jq -c '
+    [ .[] | . + { resume_cursor: ._max_t } | del(._max_t) ]')"
   next_cursor="$(printf '%s' "$filtered" | jq -r --arg fb "$cursor" '
     if length == 0 then $fb
-    else ([ .[]._max_t ] | max) | strftime("%Y-%m-%dT%H:%M:%SZ") end')"
+    else ([ .[]._max_t ] | max) end')"
 
   jq -nc --argjson b "$batches" --arg c "$next_cursor" \
     '{batches: $b, next_cursor: $c}'
@@ -780,6 +848,62 @@ _prtend_forge_gl_review_thread_bodies() {
     return 1
   fi
   printf '%s' "$discussion" | jq -r '[.notes[]? | (.body // "")] | join("\n")'
+}
+
+# -- review_thread_notes ---------------------------------------------------
+
+# Like `review_thread_bodies`, but emits per-note objects so callers can
+# answer time-sensitive questions like "is there a prtend marker on a
+# reply posted *after* this comment?" `note-post` doesn't need the
+# timestamps (it just wants any-marker-in-thread to refuse a double-post)
+# and stays on `review_thread_bodies`; `reviews-poll` uses this one to
+# avoid false-positive `already_handled` flags on fresh follow-ups in
+# already-replied threads (`docs/overview.md` § "Edge cases" item 11).
+#
+# Returns `{notes: [{id, created_at, body}, ...]}` on hit, exit 1 + empty
+# if the comment id is unknown.
+prtend_forge_review_thread_notes() {
+  prtend_forge_dispatch review_thread_notes "$@"
+}
+
+_prtend_forge_gh_review_thread_notes() {
+  local pr="${1:-}" comment_id="${2:-}" slug all
+  if [[ -z "$pr" || -z "$comment_id" ]]; then
+    prtend_log_error "review_thread_notes: missing pr or comment-id argument"; return 2
+  fi
+  slug="$(_prtend_forge_gh_repo_slug)" || return $?
+  all="$(gh api "repos/${slug}/pulls/${pr}/comments" --paginate | jq -s 'add // []')" || return $?
+  if [[ "$(printf '%s' "$all" | jq --arg cid "$comment_id" \
+        '[.[] | select((.id|tostring) == $cid)] | length')" == "0" ]]; then
+    return 1
+  fi
+  printf '%s' "$all" | jq -c --arg cid "$comment_id" '
+    (map(select((.id|tostring) == $cid))[0]) as $target
+    | (($target.in_reply_to_id // $target.id) | tostring) as $root
+    | { notes: [ .[]
+          | select((.id|tostring) == $root or ((.in_reply_to_id // "") | tostring) == $root)
+          | { id: (.id | tostring), created_at: (.created_at // ""), body: (.body // "") }
+        ] }'
+}
+
+_prtend_forge_gl_review_thread_notes() {
+  local pr="${1:-}" comment_id="${2:-}" project_id discussion
+  if [[ -z "$pr" || -z "$comment_id" ]]; then
+    prtend_log_error "review_thread_notes: missing pr or comment-id argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  discussion="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate \
+    | jq -s --arg cid "$comment_id" '
+        add // []
+        | map(select(any(.notes[]?; (.id|tostring) == $cid)))
+        | first // null')" || return $?
+  if [[ -z "$discussion" || "$discussion" == "null" ]]; then
+    return 1
+  fi
+  printf '%s' "$discussion" | jq -c '
+    { notes: [ .notes[]?
+        | { id: (.id | tostring), created_at: (.created_at // ""), body: (.body // "") }
+      ] }'
 }
 
 # -- pr_create -------------------------------------------------------------

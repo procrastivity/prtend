@@ -225,8 +225,8 @@ Notes:
 
 Cursor semantics differ:
 
-- **GitHub:** cursor is the last seen review ID. Fetch all reviews, filter to `id > cursor`, sorted by `submitted_at`.
-- **GitLab:** cursor is the last seen `created_at` timestamp of a resolved thread. Fetch discussions, filter to threads where all notes have `created_at > cursor`, sorted by max note time.
+- **GitHub:** cursor is the compound pair `"<submitted_at>|<review_id>"`. Fetch all reviews, filter to `(submitted_at > cur_ts) OR (submitted_at == cur_ts AND id > cur_id)`, sorted by `(submitted_at, id)` ascending. The id alone is unrecoverable: GitHub assigns review ids at *draft creation*, not at submission, so a draft with id=100 created before id=200 may become visible only after id=200 has been processed; an id-only filter (`.id > 200`) would silently drop it. A bare numeric cursor is accepted as a backward-compat fallback (interpreted under the legacy id-only filter); the next emission re-encodes to the compound form.
+- **GitLab:** cursor is the last seen settled-discussion max-note timestamp, ISO-8601 with `.NNN` fractional precision preserved. Fetch discussions, normalize each note's `created_at` to `.000Z` if no fractional is present, and emit a batch for every discussion where **any** note has `created_at > cursor` (lex compare on the normalized strings), sorted by max note time. `comment_ids` and the batch metadata (`submitted_at`, `author`) are computed from the *newer-than-cursor* subset of notes — a discussion that already settled past the cursor still surfaces a fresh batch when a human posts a follow-up, with only the new note in `comment_ids` (see `overview.md` § "Edge cases" item 11). Same-second collisions are common enough that second-precision cursoring would drop sibling batches; fractional precision sidesteps it.
 
 Canonical output:
 
