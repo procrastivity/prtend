@@ -220,7 +220,22 @@ _reviews_poll_emit_pending() {
       batch_resume_cursor="$next_cursor"
     fi
 
+    # `comment_ids` is the per-batch subset of notes belonging to this
+    # event — for GitHub it equals the full set returned by
+    # `review_comments`; for GitLab the forge restricts it to notes newer
+    # than the cursor so a follow-up on a previously-emitted thread (see
+    # docs/overview.md § "Edge cases" → #11) surfaces only the new note,
+    # not the whole discussion history. Filter the projection so events
+    # honor that subset.
+    local batch_comment_ids
+    batch_comment_ids="$(printf '%s' "$batches" | jq -c ".[$i].comment_ids // []")"
+
     comments_json="$(prtend_forge_review_comments "$pr" "$batch_id")" || return $?
+    # Restrict the projection to the batch's `comment_ids` set so
+    # re-emissions don't re-surface previously emitted notes.
+    comments_json="$(printf '%s' "$comments_json" | jq -c \
+      --argjson keep "$batch_comment_ids" \
+      '{comments: [.comments[] | select(.comment_id as $cid | $keep | index($cid))]}')"
     comments_count="$(printf '%s' "$comments_json" | jq '.comments | length')"
 
     event_comments_json='[]'

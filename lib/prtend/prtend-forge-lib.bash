@@ -615,17 +615,28 @@ _prtend_forge_gl_reviews_since() {
     ($cur | if . == "" then "" else norm_iso end) as $cur_n
     | [ .[]
       | . as $d
-      | ([ .notes[]? | select((.system // false) | not) | (.created_at | norm_iso) ]) as $times
-      | select(($times | length) > 0)
-      | select(all($times[]; . > $cur_n))
-      | select((($times | max) | to_epoch_f) <= ($now - $qw))
+      | ([ .notes[]? | select((.system // false) | not) ]) as $all_notes
+      | ($all_notes | map(.created_at | norm_iso)) as $all_times
+      | ($all_notes | map(select((.created_at | norm_iso) > $cur_n))) as $new_notes
+      # Emit when ANY note is newer than the cursor — a discussion that
+      # already settled past the cursor can still receive a fresh human
+      # follow-up note, which is the case `overview.md` § "Edge cases"
+      # item 11 ("New comment on a thread after Accept") explicitly
+      # promises to surface. Requiring all notes > cursor would drop the
+      # re-emission silently.
+      | select(($new_notes | length) > 0)
+      | ($all_times | max) as $_max_t
+      | select(($_max_t | to_epoch_f) <= ($now - $qw))
+      # Batch metadata is computed from the *new* notes. comment_ids is
+      # restricted to the new subset so the subcommand projection emits
+      # only fresh notes (old ones were already emitted on a prior call).
       | {
           batch_id:     (.id | tostring),
-          submitted_at: ([ .notes[]? | select((.system // false) | not) | (.created_at | norm_iso) ] | min // ""),
-          author:       (first(.notes[]? | select((.system // false) | not) | .author.username) // ""),
+          submitted_at: ($new_notes | map(.created_at | norm_iso) | min),
+          author:       ($new_notes[0].author.username // ""),
           state:        "commented",
-          comment_ids:  [ .notes[]? | select((.system // false) | not) | (.id | tostring) ],
-          _max_t:       ($times | max)
+          comment_ids:  ($new_notes | map(.id | tostring)),
+          _max_t:       $_max_t
         }
     ] | sort_by(._max_t)')"
 

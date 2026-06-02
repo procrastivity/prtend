@@ -615,10 +615,53 @@ JSON
   )
 }
 
+# ----------------------------------------------------------------------------
+# Case 17b — GitLab follow-up after cursor: a discussion that was already
+# emitted (cursor advanced past its original max-note time) must be
+# re-emitted when a human posts a new note in the same thread. The batch
+# event must surface ONLY the new note in comment_ids (docs/overview.md
+# edge case #11: "New comment on a thread after Accept — treated as a
+# fresh comment in the next review batch").
+# ----------------------------------------------------------------------------
+case_gl_reviews_since_followup_after_cursor() {
+  echo "case: gl follow-up after cursor re-emits new note only"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    export PRTEND_FORGE=gitlab
+    export PRTEND_QUIET_WINDOW=0
+    _prtend_forge_gl_project_id() { echo "1"; }
+    glab() {
+      cat <<'JSON'
+[
+  {"id":"d1","notes":[
+    {"id":11,"system":false,"created_at":"2026-01-01T00:00:00.100Z","author":{"username":"alice"},"body":"original"},
+    {"id":12,"system":false,"created_at":"2026-01-02T00:00:00.500Z","author":{"username":"alice"},"body":"follow-up"}
+  ]}
+]
+JSON
+    }
+    out="$(_prtend_forge_gl_reviews_since 7 "2026-01-01T00:00:00.100Z")"
+    assert_eq "one batch re-emitted" 1 "$(jq -c '.batches | length' <<<"$out")"
+    # comment_ids contains ONLY the new note (id 12), not the old one (11).
+    assert_eq "comment_ids count" 1 "$(jq -c '.batches[0].comment_ids | length' <<<"$out")"
+    assert_eq "new note id"       '"12"' "$(jq -c '.batches[0].comment_ids[0]' <<<"$out")"
+    # submitted_at is the new note's time (this batch represents the new
+    # activity, not the original discussion submission).
+    assert_eq "submitted_at = new" '"2026-01-02T00:00:00.500Z"' \
+      "$(jq -c '.batches[0].submitted_at' <<<"$out")"
+    # Cursor advances past the latest note so we don't re-emit next call.
+    assert_eq "resume_cursor"      '"2026-01-02T00:00:00.500Z"' \
+      "$(jq -c '.batches[0].resume_cursor' <<<"$out")"
+  )
+}
+
 case_gh_reviews_since_id_order
 case_gh_reviews_since_late_draft
 case_gh_reviews_since_legacy_numeric_cursor
 case_gl_reviews_since_fractional_cursor
+case_gl_reviews_since_followup_after_cursor
 case_block_emits_one_of_many
 case_once_empty
 case_once_one_batch
