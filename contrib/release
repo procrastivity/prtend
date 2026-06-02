@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+DIR=$(cd "$(dirname "${0}")" && pwd)
+PROJECT_ROOT=$(cd "$DIR/.." && pwd)
+cd "$PROJECT_ROOT"
+
+MANIFEST=".claude-plugin/plugin.json"
+
+usage() {
+  echo "Usage: contrib/release --major | --minor | --patch"
+  echo
+  echo "Bumps the version in ${MANIFEST}, regenerates CHANGELOG.md, commits"
+  echo "'release: vX.Y.Z', pushes the branch, then creates and pushes the"
+  echo "'{name}--vX.Y.Z' tag via 'claude plugin tag --push' (marketplaces"
+  echo "pointing at this repo pick up the tag)."
+  exit 1
+}
+
+# --- Parse arguments ---
+
+case "${1:-}" in
+--major) BUMP="major" ;;
+--minor) BUMP="minor" ;;
+--patch) BUMP="patch" ;;
+*) usage ;;
+esac
+
+# --- Preconditions ---
+
+for tool in jq git git-cliff claude; do
+  command -v "$tool" >/dev/null || {
+    echo "error: '$tool' not found on PATH (are you in the dev shell? 'direnv allow' / 'nix develop')" >&2
+    exit 1
+  }
+done
+
+# Refuse to release from a dirty tree — the release commit must contain only
+# the version bump + changelog.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "error: working tree has uncommitted changes; commit or stash them first." >&2
+  git status --short
+  exit 1
+fi
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+CURRENT_VERSION=$(jq -r .version "$MANIFEST")
+PLUGIN_NAME=$(jq -r .name "$MANIFEST")
+
+# --- Bump version (pure bash semver, no Node) ---
+
+IFS='.' read -r MAJOR MINOR PATCH <<<"$CURRENT_VERSION"
+case "$BUMP" in
+major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+patch) PATCH=$((PATCH + 1)) ;;
+esac
+NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+# 'claude plugin tag' creates a '{name}--v{version}' tag; compute the same string
+# so the changelog's "this release" section is labeled identically to the tag.
+TAG="${PLUGIN_NAME}--v${NEW_VERSION}"
+
+echo "Releasing ${CURRENT_VERSION} -> ${NEW_VERSION} (tag ${TAG}) on branch ${BRANCH}"
+
+# Write the new version back (temp + mv so a jq error can't truncate the file).
+tmp=$(mktemp)
+jq --arg v "$NEW_VERSION" '.version = $v' "$MANIFEST" >"$tmp" && mv "$tmp" "$MANIFEST"
+
+# --- Regenerate changelog ---
+#
+# Full regeneration (not --prepend) keeps the file deterministic: past versions
+# are sectioned from their tags, and --tag treats the not-yet-created tag's
+# commits as belonging to this release.
+echo "Updating CHANGELOG.md..."
+git-cliff --tag "$TAG" -o CHANGELOG.md
+
+# --- Commit the bump (before tagging) ---
+#
+# 'release: vX.Y.Z' matches the cliff skip rule so the release commit itself
+# stays out of the changelog.
+git add "$MANIFEST" CHANGELOG.md
+git commit -m "release: v${NEW_VERSION}"
+
+# --- Push branch, then tag via the plugin CLI ---
+#
+# Push the branch first so the tag references a commit already on the remote
+# branch. 'claude plugin tag' re-validates the clean tree (satisfied by the
+# commit above) and that plugin.json's version agrees with any marketplace
+# entry; %s expands to the version in the annotation.
+echo "Pushing ${BRANCH}..."
+git push
+
+echo "Tagging ${TAG}..."
+claude plugin tag --push -m "Release %s"
+
+# --- Notify the marketplace repo ---
+#
+# Best-effort: ping procrastivity/claude-plugins so it regenerates its README /
+# marketplace metadata against this plugin's new version. Uses the releaser's
+# local 'gh' auth (no stored secrets). The tag is already pushed at this point,
+# so a failure here must not fail the release — warn and continue.
+MARKETPLACE_REPO="procrastivity/claude-plugins"
+if ! command -v gh >/dev/null; then
+  echo "note: 'gh' not installed; skipping ${MARKETPLACE_REPO} notification (it will catch up on its next scheduled run)." >&2
+elif ! gh auth status >/dev/null 2>&1; then
+  echo "note: 'gh' not authenticated; skipping ${MARKETPLACE_REPO} notification (it will catch up on its next scheduled run)." >&2
+else
+  echo "Notifying ${MARKETPLACE_REPO} of the release..."
+  gh api "repos/${MARKETPLACE_REPO}/dispatches" -f event_type=plugin-released ||
+    echo "warning: could not notify ${MARKETPLACE_REPO} (it will catch up on its next scheduled run)." >&2
+fi
+
+cat <<EOF
+
+Pushed ${TAG}. Marketplaces pointing at this repo will pick up the new tag.
+EOF
