@@ -159,6 +159,34 @@ prtend_state_get_cursor() {
   jq -r '.last_review_cursor // ""' < "$path"
 }
 
+prtend_state_set_ci_last_state() {
+  local pr="${1:-}" state="${2:-}" path existing updated
+  [[ -n "$pr" ]] || { prtend_log_error "set_ci_last_state: missing pr"; return 2; }
+  [[ "$pr" =~ ^[0-9]+$ ]] || { prtend_log_error "set_ci_last_state: pr must be numeric (got '$pr')"; return 2; }
+  [[ -n "$state" ]] || { prtend_log_error "set_ci_last_state: missing state"; return 2; }
+
+  path="$(prtend_state_path "$pr")" || return $?
+  if [[ -f "$path" ]]; then
+    _prtend_state_validate_file "$path" || return $?
+    existing="$(cat -- "$path")"
+  else
+    existing="$(_prtend_state_seed_json "$pr")"
+  fi
+  updated="$(printf '%s' "$existing" | jq --arg state "$state" '.ci_last_state = $state')"
+  prtend_state_write "$pr" "$updated"
+}
+
+prtend_state_get_ci_last_state() {
+  local pr="${1:-}" path
+  [[ -n "$pr" ]] || { prtend_log_error "get_ci_last_state: missing pr"; return 2; }
+  path="$(prtend_state_path "$pr")" || return $?
+  if [[ ! -f "$path" ]]; then
+    return 0
+  fi
+  _prtend_state_validate_file "$path" || return $?
+  jq -r '.ci_last_state // empty' < "$path"
+}
+
 prtend_state_clear() {
   local pr="${1:-}" path
   [[ -n "$pr" ]] || { prtend_log_error "clear: missing pr"; return 2; }

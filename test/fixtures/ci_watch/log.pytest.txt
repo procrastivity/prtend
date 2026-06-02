@@ -1,0 +1,1 @@
+FAILED tests/test_widget.py::test_widget_renders - AssertionError: expected 42, got NaN

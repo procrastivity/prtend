@@ -1,0 +1,1 @@
+{"state":"success","checks":[{"name":"test:unit","state":"completed","conclusion":"success","url":"https://github.com/o/r/actions/runs/100"},{"name":"lint","state":"completed","conclusion":"success","url":"https://github.com/o/r/actions/runs/101"}]}

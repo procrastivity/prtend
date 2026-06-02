@@ -1,0 +1,3 @@
+--- FAIL: TestWidget (0.01s)
+    widget_test.go:42: expected 42, got NaN
+FAIL

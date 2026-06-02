@@ -11,6 +11,12 @@ PRTEND_FORGE_LIB_LOADED=1
 
 set -euo pipefail
 
+# Signature derivation used by ci_failures; sourced here so callers of
+# prtend_forge_ci_failures don't have to remember a second lib.
+# shellcheck source=lib/prtend/prtend-signature-lib.bash
+# shellcheck disable=SC1091
+source "${BASH_SOURCE[0]%/*}/prtend-signature-lib.bash"
+
 # -- internal dispatch -----------------------------------------------------
 
 # Calls _prtend_forge_gh_<suffix> or _prtend_forge_gl_<suffix> based on the
@@ -1017,4 +1023,152 @@ _prtend_forge_gl_reviewer_add() {
   fi
   printf '%s\n' "$err" >&2
   return "$rc"
+}
+
+# -- ci_failures -----------------------------------------------------------
+# Canonical {failures:[{check_name,conclusion,log_url,log_excerpt,signature}]}.
+# `signature` is computed by prtend-signature-lib.bash, not the forge.
+# See ../docs/forge-mapping.md § "CI failures (detail)".
+
+prtend_forge_ci_failures() {
+  prtend_forge_dispatch ci_failures "$@"
+}
+
+# Build one canonical failure object on stdout. Reads the excerpt from a
+# temp file so signature derivation can re-read it without re-passing the
+# (potentially large) body through argv.
+_prtend_forge_ci_failure_obj() {
+  local check_name="$1" conclusion="$2" log_url="$3" log_path="$4" sig excerpt
+  excerpt="$(cat -- "$log_path")"
+  sig="$(prtend_signature_from_log "$check_name" "$log_path")"
+  jq -cn \
+    --arg name "$check_name" \
+    --arg concl "$conclusion" \
+    --arg url "$log_url" \
+    --arg excerpt "$excerpt" \
+    --arg sig "$sig" \
+    '{check_name:$name, conclusion:$concl, log_url:$url, log_excerpt:$excerpt, signature:$sig}'
+}
+
+_prtend_forge_gh_ci_failures() {
+  local pr="${1:-}" checks_json count i name link run_id log_tmp
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "ci_failures: missing pr argument"; return 2
+  fi
+  # Re-use the same json fields ci_status uses so the two views agree.
+  checks_json="$(gh pr checks "$pr" --json name,bucket,workflow,link 2>/dev/null)" || {
+    # No checks reported (gh exit 1, empty stdout) → no failures.
+    printf '{"failures":[]}\n'; return 0; }
+  if [[ -z "$checks_json" ]]; then
+    printf '{"failures":[]}\n'; return 0
+  fi
+  local failed
+  failed="$(printf '%s' "$checks_json" | jq -c '[ .[] | select(.bucket == "fail") ]')"
+  count="$(printf '%s' "$failed" | jq 'length')"
+  if (( count == 0 )); then
+    printf '{"failures":[]}\n'; return 0
+  fi
+  local -a objs=()
+  for ((i=0; i<count; i++)); do
+    name="$(printf '%s' "$failed" | jq -r ".[$i].name // \"\"")"
+    link="$(printf '%s' "$failed" | jq -r ".[$i].link // \"\"")"
+    # Run id parse from link `…/actions/runs/<run-id>/job/<job-id>`.
+    run_id=""
+    if [[ "$link" =~ /actions/runs/([0-9]+)(/|$) ]]; then
+      run_id="${BASH_REMATCH[1]}"
+    fi
+    log_tmp="$(mktemp)"
+    if [[ -n "$run_id" ]]; then
+      gh run view "$run_id" --log-failed 2>/dev/null | tail -n 50 > "$log_tmp" || true
+    fi
+    objs+=( "$(_prtend_forge_ci_failure_obj "$name" "failure" "$link" "$log_tmp")" )
+    rm -f -- "$log_tmp"
+  done
+  printf '%s\n' "${objs[@]}" | jq -cs '{failures: .}'
+}
+
+_prtend_forge_gl_ci_failures() {
+  local pr="${1:-}" project_id mr_json pipeline_id jobs_json failed count i
+  local job_id name web_url log_tmp
+  if [[ -z "$pr" ]]; then
+    prtend_log_error "ci_failures: missing pr argument"; return 2
+  fi
+  project_id="$(_prtend_forge_gl_project_id)" || return $?
+  mr_json="$(glab mr view "$pr" --output json)" || return $?
+  pipeline_id="$(printf '%s' "$mr_json" | jq -r '.head_pipeline.id // empty')"
+  if [[ -z "$pipeline_id" ]]; then
+    printf '{"failures":[]}\n'; return 0
+  fi
+  jobs_json="$(glab api "projects/${project_id}/pipelines/${pipeline_id}/jobs")" || return $?
+  failed="$(printf '%s' "$jobs_json" | jq -c '[ .[] | select(.status == "failed") ]')"
+  count="$(printf '%s' "$failed" | jq 'length')"
+  if (( count == 0 )); then
+    printf '{"failures":[]}\n'; return 0
+  fi
+  local -a objs=()
+  for ((i=0; i<count; i++)); do
+    job_id="$(printf '%s' "$failed" | jq -r ".[$i].id")"
+    name="$(printf '%s' "$failed" | jq -r ".[$i].name // \"\"")"
+    web_url="$(printf '%s' "$failed" | jq -r ".[$i].web_url // \"\"")"
+    log_tmp="$(mktemp)"
+    # `glab api .../trace` returns plain text; `glab ci trace` may be
+    # interactive in tty contexts, so prefer the API endpoint.
+    glab api "projects/${project_id}/jobs/${job_id}/trace" 2>/dev/null | tail -n 50 > "$log_tmp" || true
+    objs+=( "$(_prtend_forge_ci_failure_obj "$name" "failure" "$web_url" "$log_tmp")" )
+    rm -f -- "$log_tmp"
+  done
+  printf '%s\n' "${objs[@]}" | jq -cs '{failures: .}'
+}
+
+# -- ci_watch_block --------------------------------------------------------
+# Block until prtend_forge_ci_status reports a `.state` different from
+# <last_state>, or the PR closes. Honors $PRTEND_POLL_INTERVAL (default 15s).
+# Echoes the new ci_status JSON; exit 4 if the PR closes mid-watch.
+
+prtend_forge_ci_watch_block() {
+  prtend_forge_dispatch ci_watch_block "$@"
+}
+
+_prtend_forge_ci_watch_block_common() {
+  # Forge-agnostic poll loop. Used by both gh and gl privates; keeps the two
+  # symmetric and lets the test harness drive every iteration via mocks.
+  # Optional <max_seconds> bounds the wait; on expiry returns 124 (mirrors
+  # the coreutils `timeout` convention) so the subcommand can map that to a
+  # clean exit-0-no-output per the cli-contract.
+  local pr="${1:-}" last_state="${2:-}" max_seconds="${3:-}"
+  local status state pr_state_json pr_state interval start now elapsed
+  if [[ -z "$pr" || -z "$last_state" ]]; then
+    prtend_log_error "ci_watch_block: missing pr or last_state"; return 2
+  fi
+  interval="${PRTEND_POLL_INTERVAL:-15}"
+  start="${SECONDS}"
+  while :; do
+    status="$(prtend_forge_ci_status "$pr")" || return $?
+    state="$(printf '%s' "$status" | jq -r '.state // ""')"
+    if [[ -n "$state" && "$state" != "$last_state" ]]; then
+      printf '%s\n' "$status"
+      return 0
+    fi
+    pr_state_json="$(prtend_forge_pr_state "$pr")" || return $?
+    pr_state="$(printf '%s' "$pr_state_json" | jq -r '.state // ""')"
+    if [[ "$pr_state" == "closed" || "$pr_state" == "merged" ]]; then
+      return 4
+    fi
+    if [[ -n "$max_seconds" ]]; then
+      now="${SECONDS}"
+      elapsed=$(( now - start ))
+      if (( elapsed >= max_seconds )); then
+        return 124
+      fi
+    fi
+    sleep "$interval"
+  done
+}
+
+_prtend_forge_gh_ci_watch_block() {
+  _prtend_forge_ci_watch_block_common "$@"
+}
+
+_prtend_forge_gl_ci_watch_block() {
+  _prtend_forge_ci_watch_block_common "$@"
 }

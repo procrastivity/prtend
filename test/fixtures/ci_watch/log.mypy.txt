@@ -1,0 +1,1 @@
+src/widget.py:42: error: Incompatible return value type (got "str", expected "int")  [return-value]

@@ -1,0 +1,1 @@
+{"failures":[{"check_name":"test:unit","conclusion":"failure","log_url":"https://github.com/o/r/actions/runs/200","log_excerpt":"FAIL src/widget.test.ts\n  ● widget renders correctly\n    Expected: 42\n    Received: NaN\n","signature":"jest:widget.test.ts:42-NaN"}]}
