@@ -1055,11 +1055,19 @@ _prtend_forge_gh_ci_failures() {
   if [[ -z "$pr" ]]; then
     prtend_log_error "ci_failures: missing pr argument"; return 2
   fi
-  # Re-use the same json fields ci_status uses so the two views agree.
-  checks_json="$(gh pr checks "$pr" --json name,bucket,workflow,link 2>/dev/null)" || {
-    # No checks reported (gh exit 1, empty stdout) → no failures.
-    printf '{"failures":[]}\n'; return 0; }
+  # `gh pr checks --json` exits non-zero when any check failed or is still
+  # pending; that's data, not an error. Capture stdout regardless of exit
+  # code (same pattern as _prtend_forge_gh_ci_status) and only treat an
+  # empty stdout as "nothing to report."
+  local rc=0
+  checks_json="$(gh pr checks "$pr" --json name,bucket,workflow,link 2>/dev/null)" || rc=$?
   if [[ -z "$checks_json" ]]; then
+    if (( rc != 0 )); then
+      # Distinguish "no checks reported" (valid: empty failure list) from
+      # genuine API failure. gh prints "no checks reported" on stderr in
+      # the former; we already swallowed stderr, so fall through to empty.
+      :
+    fi
     printf '{"failures":[]}\n'; return 0
   fi
   local failed
@@ -1154,14 +1162,22 @@ _prtend_forge_ci_watch_block_common() {
     if [[ "$pr_state" == "closed" || "$pr_state" == "merged" ]]; then
       return 4
     fi
+    local nap="$interval"
     if [[ -n "$max_seconds" ]]; then
       now="${SECONDS}"
       elapsed=$(( now - start ))
       if (( elapsed >= max_seconds )); then
         return 124
       fi
+      # Cap the sleep to the remaining wall-clock budget so a short
+      # --timeout actually returns near its requested bound instead of
+      # waiting out a full poll interval.
+      local remaining=$(( max_seconds - elapsed ))
+      if (( remaining < nap )); then
+        nap="$remaining"
+      fi
     fi
-    sleep "$interval"
+    sleep "$nap"
   done
 }
 
