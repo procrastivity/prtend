@@ -120,14 +120,19 @@ This is a deliberately cheap check — not a full diff-rename detection, not a l
 
 Cache the per-`path` result inside `_reviews_poll_emit_pending` (associative array `path → "0"|"1"` for existence, and `path → <int>` for line count) so a batch with N comments on the same file pays the `git show` cost once.
 
-### `lib/prtend/prtend-forge-lib.bash` — one additive field per batch
+### `lib/prtend/prtend-forge-lib.bash` — per-batch `resume_cursor` + two ordering fixes
 
-Add a `resume_cursor` field to each batch object emitted by `_prtend_forge_gh_reviews_since` and `_prtend_forge_gl_reviews_since`. The field is the per-batch resume token — what the *next* `reviews_since` call should pass to skip past this batch alone:
+Three changes in this file. All small, all required to honor the one-batch-per-blocking-call contract without dropping batches:
 
-- GitHub: the batch's review id (cursors are review ids). `resume_cursor: $id` next to `batch_id`.
-- GitLab: the batch's max settled-note timestamp, ISO-formatted. The across-call `next_cursor` is `max(.[].resume_cursor)` (semantically identical to the previous `max(._max_t)`).
+1. **Add a `resume_cursor` field to every batch.** Emitted by both `_prtend_forge_gh_reviews_since` and `_prtend_forge_gl_reviews_since`. It's the per-batch resume token — the cursor value the *next* `reviews_since` call should pass to skip past this batch alone:
+   - GitHub: the batch's review id (cursors are review ids). `resume_cursor: $id` next to `batch_id`.
+   - GitLab: the batch's max settled-note timestamp, ISO-formatted (see fix 3 below for precision). The across-call `next_cursor` is `max(.[].resume_cursor)`.
 
-Everything else stays unchanged — `next_cursor` keeps its across-call meaning, the existing batch fields keep their shapes, no new dispatch entries. The subcommand needs the per-batch token to honor the streamed-command contract (`../cli-contract.md` § "Output discipline"): in `--block` mode it emits one batch and advances state past *just that batch*, leaving the rest for the next call. With only the across-call `next_cursor` available, truncating in `--block` would silently drop unemitted batches by advancing past them. The shape mismatch absorption (`state` → `review_state`, `anchor_stale: false` → computed) still belongs in the subcommand; this one field can't be computed there because GitLab's max-note timestamp isn't in any other public projection.
+2. **GitHub: sort batches by `.id`, not `.submitted_at`.** The cursor is a review id and the downstream filter is `select(.id > $cur)`; emission order must be monotonic in id, or `--block` (which writes the first emitted batch's `resume_cursor` to state) silently loses lower-id reviews. Concretely: a reviewer drafts review A (id=200) on Monday, drafts B (id=100) on Tuesday, submits A Wednesday, B Thursday. With `submitted_at` sort: emit A first, cursor=200, next call `.id > 200` skips B forever. With `.id` sort: emit B (id=100), cursor=100, next call `.id > 100` picks up A. The lib's job is to make the cursor work; reordering by id is the right surface.
+
+3. **GitLab: preserve fractional-second precision in the cursor.** Two discussions whose latest notes fall in the same whole second are common enough that a second-precision cursor would advance past one and silently swallow the others in `--block`. The original implementation truncated via `fromdateiso8601` (which can't parse fractional). Fix: keep `created_at` strings, normalize to `.NNN` fractional width via `norm_iso` (pad `Z` → `.000Z`), and lex-compare them. The `> $cur` filter and `max`/`min` aggregates work directly on the normalized strings (lex order == temporal order at fixed width). Convert to numeric epoch only for the quiet-window check (`<= now - qw`) via a `to_epoch_f` helper that parses fractional. The cursor wire format remains ISO; `.000Z` padding makes old seconds-only cursors compare correctly.
+
+Everything else in the file stays unchanged — no new dispatch entries, no new public functions, no contract changes to other primitives. The subcommand consumes `resume_cursor` directly; it has no way to compute it locally (GitLab's max settled-note timestamp isn't surfaced anywhere else, and the ordering choice is a forge-internal concern).
 
 ### `lib/prtend/prtend-state-lib.bash` — no changes
 

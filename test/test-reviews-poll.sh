@@ -447,6 +447,91 @@ case_block_emits_one_of_many() {
   )
 }
 
+# ----------------------------------------------------------------------------
+# Case 16 — GitHub forge: reviews_since must sort by .id, not .submitted_at,
+# so that the per-batch resume_cursor (= review id) is monotonic with
+# emission order. A draft review created before but submitted after a
+# later-created review must NOT be skipped on the next call.
+# ----------------------------------------------------------------------------
+case_gh_reviews_since_id_order() {
+  echo "case: gh reviews_since sorts by id"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    # Two reviews on the same PR. id=100 was drafted earlier and submitted
+    # LATER (later submitted_at); id=200 was submitted first.
+    _prtend_forge_gh_repo_slug() { echo "o/r"; }
+    # Pretend gh api returns these two reviews; the comments endpoint
+    # returns empty for each. We intercept the gh wrapper used by
+    # _prtend_forge_gh_reviews_since.
+    gh() {
+      case "$*" in
+        *"/reviews "*|*"/reviews"*)
+          if [[ "$*" == *"/reviews/"*"/comments"* ]]; then
+            echo '[]'
+          else
+            cat <<'JSON'
+[
+  {"id":200,"submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"},"state":"COMMENTED"},
+  {"id":100,"submitted_at":"2026-01-02T00:00:00Z","user":{"login":"bob"},"state":"APPROVED"}
+]
+JSON
+          fi ;;
+        *) echo "unexpected gh args: $*" >&2; return 1 ;;
+      esac
+    }
+    out="$(_prtend_forge_gh_reviews_since 7 0)"
+    # Emission order must be id-ascending: 100 first, then 200.
+    assert_eq "first batch_id"     '"100"' "$(jq -c '.batches[0].batch_id' <<<"$out")"
+    assert_eq "second batch_id"    '"200"' "$(jq -c '.batches[1].batch_id' <<<"$out")"
+    assert_eq "first resume_cursor"  '"100"' "$(jq -c '.batches[0].resume_cursor' <<<"$out")"
+    assert_eq "second resume_cursor" '"200"' "$(jq -c '.batches[1].resume_cursor' <<<"$out")"
+    assert_eq "across-call next_cursor" '"200"' "$(jq -c '.next_cursor' <<<"$out")"
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 17 — GitLab forge: cursor must keep fractional-second precision so
+# `--block` emitting one of two same-second discussions leaves the other
+# pending for the next call (instead of filtering it out via `> $cur`).
+# ----------------------------------------------------------------------------
+case_gl_reviews_since_fractional_cursor() {
+  echo "case: gl reviews_since preserves fractional cursor"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    export PRTEND_FORGE=gitlab
+    export PRTEND_QUIET_WINDOW=0
+    _prtend_forge_gl_project_id() { echo "1"; }
+    glab() {
+      cat <<'JSON'
+[
+  {"id":"d1","notes":[{"id":11,"system":false,"created_at":"2026-01-01T00:00:00.176Z","author":{"username":"alice"},"body":"a"}]},
+  {"id":"d2","notes":[{"id":21,"system":false,"created_at":"2026-01-01T00:00:00.500Z","author":{"username":"bob"},"body":"b"}]}
+]
+JSON
+    }
+    out="$(_prtend_forge_gl_reviews_since 7 "")"
+    # Two batches; per-batch resume_cursor preserves the fractional ms.
+    assert_eq "two batches" 2 "$(jq -c '.batches | length' <<<"$out")"
+    assert_eq "first resume_cursor"  '"2026-01-01T00:00:00.176Z"' "$(jq -c '.batches[0].resume_cursor' <<<"$out")"
+    assert_eq "second resume_cursor" '"2026-01-01T00:00:00.500Z"' "$(jq -c '.batches[1].resume_cursor' <<<"$out")"
+    # Now feed back the FIRST batch's resume_cursor as the next cursor;
+    # the .176Z discussion must drop out, the .500Z discussion must stay.
+    out2="$(_prtend_forge_gl_reviews_since 7 "2026-01-01T00:00:00.176Z")"
+    assert_eq "one batch after first cursor" 1 "$(jq -c '.batches | length' <<<"$out2")"
+    assert_eq "remaining batch_id" '"d2"' "$(jq -c '.batches[0].batch_id' <<<"$out2")"
+    # And: a backward-compat cursor with no fractional ("...:00Z") must
+    # still let both batches through (norm_iso pads to .000Z which is < .176Z).
+    out3="$(_prtend_forge_gl_reviews_since 7 "2026-01-01T00:00:00Z")"
+    assert_eq "both batches with seconds-only cursor" 2 "$(jq -c '.batches | length' <<<"$out3")"
+  )
+}
+
+case_gh_reviews_since_id_order
+case_gl_reviews_since_fractional_cursor
 case_block_emits_one_of_many
 case_once_empty
 case_once_one_batch

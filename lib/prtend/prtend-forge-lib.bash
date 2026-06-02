@@ -490,8 +490,15 @@ _prtend_forge_gh_reviews_since() {
   # Defensively slurp+flatten so the downstream jq filter sees one array.
   reviews_json="$(gh api "repos/${slug}/pulls/${pr}/reviews" --paginate | jq -s 'add // []')" || return $?
 
+  # Sort by .id, NOT .submitted_at: the cursor IS a review id, and the
+  # downstream `.id > $cur` filter requires the per-batch resume_cursor
+  # (which is the id) to be monotonic with emission order. A reviewer who
+  # drafts a review early and submits it later can produce a row where
+  # `submitted_at` order disagrees with `id` order; sorting by `submitted_at`
+  # would emit the higher-id first under `--block`, advance the cursor
+  # past it, and silently drop the lower-id review on the next call.
   filtered="$(printf '%s' "$reviews_json" | jq -c --argjson cur "$cursor" '
-    [ .[] | select(.id > $cur) ] | sort_by(.submitted_at)')"
+    [ .[] | select(.id > $cur) ] | sort_by(.id)')"
   count="$(printf '%s' "$filtered" | jq 'length')"
   batches='[]'
   max_id="$cursor"
@@ -545,7 +552,7 @@ _prtend_forge_gl_discussion_settled() {
 # than the cursor, and (b) the latest note is older than now - PRTEND_QUIET_WINDOW.
 _prtend_forge_gl_reviews_since() {
   local pr="${1:-}" cursor="${2:-}" project_id quiet_window now
-  local discussions_json filtered batches next_cursor cursor_epoch
+  local discussions_json filtered batches next_cursor
   if [[ -z "$pr" ]]; then
     prtend_log_error "reviews_since: missing pr argument"; return 2
   fi
@@ -553,29 +560,36 @@ _prtend_forge_gl_reviews_since() {
   quiet_window="${PRTEND_QUIET_WINDOW:-60}"
   now="$(date -u +%s)"
 
-  cursor_epoch=0
-  if [[ -n "$cursor" ]]; then
-    cursor_epoch="$(_prtend_iso_to_epoch "$cursor" 2>/dev/null || echo 0)"
-  fi
-
   discussions_json="$(glab api "projects/${project_id}/merge_requests/${pr}/discussions" --paginate)" || return $?
 
-  # GitLab timestamps include fractional seconds (e.g. `...46.176Z`), which
-  # jq's `fromdateiso8601` rejects in jq 1.6. Strip the fractional portion
-  # before parsing. Sort by max-note time (the settling time) per spec —
-  # `submitted_at` is the earliest note and isn't a stable batch order key.
+  # GitLab created_at strings include fractional seconds (e.g. `...46.176Z`).
+  # We MUST preserve that precision in the cursor: two discussions whose
+  # latest notes fall in the same whole second are common enough that a
+  # second-precision cursor (the original implementation truncated via
+  # `fromdateiso8601`) would advance past one and silently swallow the
+  # others under `--block` (the next `all($times[]; . > $cur)` would
+  # exclude any note at the same second). Compare ISO strings directly,
+  # after normalizing to a canonical width — the only catch is that
+  # backward-compat cursors written by an older version (or by the user)
+  # might omit the fractional portion, so we pad to `.000Z`. Lex order on
+  # the normalized form matches temporal order.
   filtered="$(printf '%s' "$discussions_json" | jq -s 'add // []' | jq -c \
-    --argjson cur "$cursor_epoch" --argjson now "$now" --argjson qw "$quiet_window" '
-    def to_epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
-    [ .[]
+    --arg cur "$cursor" --argjson now "$now" --argjson qw "$quiet_window" '
+    def norm_iso:
+      if test("\\.[0-9]+Z$") then . else sub("Z$"; ".000Z") end;
+    def to_epoch_f:
+      capture("^(?<sec>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?<frac>\\.\\d+)?Z$") as $m
+      | ($m.sec + "Z" | fromdateiso8601) + (($m.frac // "0") | tonumber);
+    ($cur | if . == "" then "" else norm_iso end) as $cur_n
+    | [ .[]
       | . as $d
-      | ([ .notes[]? | select((.system // false) | not) | (.created_at | to_epoch) ]) as $times
+      | ([ .notes[]? | select((.system // false) | not) | (.created_at | norm_iso) ]) as $times
       | select(($times | length) > 0)
-      | select(all($times[]; . > $cur))
-      | select(($times | max) <= ($now - $qw))
+      | select(all($times[]; . > $cur_n))
+      | select((($times | max) | to_epoch_f) <= ($now - $qw))
       | {
           batch_id:     (.id | tostring),
-          submitted_at: ([ .notes[]? | select((.system // false) | not) | .created_at ] | min // ""),
+          submitted_at: ([ .notes[]? | select((.system // false) | not) | (.created_at | norm_iso) ] | min // ""),
           author:       (first(.notes[]? | select((.system // false) | not) | .author.username) // ""),
           state:        "commented",
           comment_ids:  [ .notes[]? | select((.system // false) | not) | (.id | tostring) ],
@@ -583,15 +597,14 @@ _prtend_forge_gl_reviews_since() {
         }
     ] | sort_by(._max_t)')"
 
-  # `resume_cursor` is the per-batch resume token — the ISO-formatted max
-  # settled-note timestamp for the batch. Used by the subcommand's `--block`
-  # path to advance state past just the one batch it emits (the across-call
-  # `next_cursor` is the max of all per-batch resume_cursors).
+  # `resume_cursor` is the per-batch resume token — the normalized ISO max
+  # settled-note timestamp for the batch (with `.NNN` fractional preserved).
+  # The across-call `next_cursor` is the lex-max of per-batch resume_cursors.
   batches="$(printf '%s' "$filtered" | jq -c '
-    [ .[] | . + { resume_cursor: (._max_t | strftime("%Y-%m-%dT%H:%M:%SZ")) } | del(._max_t) ]')"
+    [ .[] | . + { resume_cursor: ._max_t } | del(._max_t) ]')"
   next_cursor="$(printf '%s' "$filtered" | jq -r --arg fb "$cursor" '
     if length == 0 then $fb
-    else ([ .[]._max_t ] | max) | strftime("%Y-%m-%dT%H:%M:%SZ") end')"
+    else ([ .[]._max_t ] | max) end')"
 
   jq -nc --argjson b "$batches" --arg c "$next_cursor" \
     '{batches: $b, next_cursor: $c}'
