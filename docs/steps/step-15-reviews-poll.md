@@ -76,14 +76,15 @@ Composition (in order):
 4. **Branch on mode:**
 
    - **`--once`:** call `_reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor"` exactly once. The helper does the `reviews_since` → `review_comments` → projection → emit dance described below. Whatever it returns (0 batches or N batches), exit 0 unless the call surfaced exit 4 (PR closed → propagate).
-   - **`--block` (with or without `--timeout`):** track elapsed time in-process — do *not* wrap the loop in `timeout(1)`. Capture `start="$SECONDS"` before entering the loop. Loop body:
-     1. Call the same helper.
-     2. If it emitted ≥1 batch, exit 0. (The helper has already written the cursor when `write_cursor=true`.)
-     3. Else re-check PR state via `prtend_forge_pr_state "$pr"`; on `closed`/`merged`, exit 4 with the documented stderr.
-     4. If `--timeout` is present and `(( SECONDS - start >= timeout_seconds ))`, return 0 with no output and no cursor write (clean timeout).
-     5. `sleep "${PRTEND_POLL_INTERVAL:-15}"` (cap the sleep to the remaining wall-clock budget when `--timeout` is set, so a short timeout actually returns near its bound) and repeat.
+   - **`--block` (with or without `--timeout`):** track elapsed time in-process — do *not* wrap the loop in `timeout(1)`. Capture `start="$SECONDS"` before entering the loop. Loop body, with the deadline check guarding both ends so a batch arriving *during sleep* at or past the budget is **not** emitted:
+     1. If this is a subsequent iteration (not the first) and `--timeout` is present and `(( SECONDS - start >= timeout_seconds ))`, return 0 with no output and no cursor write. (The first iteration always runs — `start="$SECONDS"` immediately precedes it, so the deadline can't have passed yet.)
+     2. Call the same helper.
+     3. If it emitted ≥1 batch, exit 0. (The helper has already written the cursor when `write_cursor=true`.)
+     4. Else re-check PR state via `prtend_forge_pr_state "$pr"`; on `closed`/`merged`, exit 4 with the documented stderr.
+     5. If `--timeout` is present and `(( SECONDS - start >= timeout_seconds ))`, return 0 with no output and no cursor write (pre-sleep short-circuit).
+     6. `sleep "${PRTEND_POLL_INTERVAL:-15}"` (cap the sleep to the remaining wall-clock budget when `--timeout` is set, so a short timeout actually returns near its bound) and repeat.
 
-     This mirrors `_prtend_forge_ci_watch_block_common` in `lib/prtend/prtend-forge-lib.bash:1140` — same elapsed-time pattern, same 124-style semantics absorbed locally without the `timeout(1)` wrap.
+     This mirrors `_prtend_forge_ci_watch_block_common` in `lib/prtend/prtend-forge-lib.bash:1140` — same elapsed-time pattern, same 124-style semantics absorbed locally without the `timeout(1)` wrap. The post-sleep / pre-emit deadline check (step 1) is the difference: ci-watch's loop body is forge-side and exits 124 on the same check before each sample, so reviews-poll's loop has to do the same.
 
 5. **Helper `_reviews_poll_emit_pending <pr> <cursor> <write_cursor>`** (private to this file, prefix `_reviews_poll_`):
    - Call `prtend_forge_reviews_since "$pr" "$cursor"` and capture the `{batches, next_cursor}` JSON. Propagate any non-zero forge exit code.
@@ -93,7 +94,7 @@ Composition (in order):
      - Call `prtend_forge_review_comments "$pr" "$batch_id"` → `{comments: [...]}`. Note: for GitHub the second argument is the review id (== `batch_id`); for GitLab it is the discussion id (also `batch_id`). The dispatch is identical from the subcommand's perspective.
      - For each comment in `comments[]`:
        - Compute `anchor_stale` locally (see "Anchor staleness" below). Overwrite the `anchor_stale: false` field returned by the forge lib.
-       - Compute `already_handled` by calling `prtend_forge_review_thread_bodies "$pr" "$comment_id"` (see `lib/prtend/prtend-forge-lib.bash:737`) and running the result through `prtend_note_is_handled`. The primitive returns the concatenated bodies of every comment in the thread containing `comment_id` — original anchored note + every reply on GitHub, all notes in the discussion on GitLab — which is exactly what `note-post`'s own idempotency probe uses. Treat exit 1 (id unknown — shouldn't happen, since we just received the id from `review_comments`) as "not handled" and move on. Cache the result in a per-batch associative array keyed by `comment_id` (only useful when two projected comments resolve to the same thread, but cheap to keep).
+       - Compute `already_handled` by calling `prtend_forge_review_thread_bodies "$pr" "$comment_id"` (see `lib/prtend/prtend-forge-lib.bash:737`) and running the result through `prtend_note_is_handled`. The primitive returns the concatenated bodies of every comment in the thread containing `comment_id` — original anchored note + every reply on GitHub, all notes in the discussion on GitLab — which is exactly what `note-post`'s own idempotency probe uses. Treat exit 1 (id unknown — shouldn't happen, since we just received the id from `review_comments`) as "not handled" and move on. **Treat any *other* nonzero exit (network, auth, API error) as a hard failure: return that exit code from the helper so `_reviews_poll_emit_pending` aborts before writing the cursor.** Downgrading a transient lookup failure to `already_handled:false` would tell the watch loop "this thread is fresh" and cause a duplicate `note-post` on a thread that has, in fact, already been replied to. Cache the successful result in a per-batch associative array keyed by `comment_id` (only useful when two projected comments resolve to the same thread, but cheap to keep).
        - Replace `already_handled: …` in the comment object with the computed boolean.
      - Project the per-batch event:
        - `type`: `"review_batch"`

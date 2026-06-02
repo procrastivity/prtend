@@ -358,6 +358,61 @@ case_already_handled_thread_walk() {
   )
 }
 
+# ----------------------------------------------------------------------------
+# Case 13 — review_thread_bodies fails with exit 2 (not exit 1 / id-unknown):
+# the poll must abort, NOT downgrade the comment to already_handled=false
+# (which would let a watch loop double-post on a thread that's actually
+# already been replied to).
+# ----------------------------------------------------------------------------
+case_thread_bodies_hard_failure() {
+  echo "case: thread_bodies hard failure aborts"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
+    _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.one_batch.json"; }
+    _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
+    _prtend_forge_gh_review_thread_bodies() { return 2; }
+    out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code propagated" 2 "$rc"
+    assert_eq "no event emitted" "" "$out"
+    assert_eq "cursor not advanced" "" "$(prtend_state_get_cursor 7)"
+  )
+}
+
+# ----------------------------------------------------------------------------
+# Case 14 — --block --timeout: a batch that arrives at-or-after the deadline
+# must NOT be emitted (timeout contract is exit 0 / no output / no cursor
+# write, with no one-more-peek). The mock returns empty for the first poll
+# and a batch on the second; PRTEND_POLL_INTERVAL is large enough that the
+# second poll happens past the timeout.
+# ----------------------------------------------------------------------------
+case_block_timeout_no_late_emit() {
+  echo "case: --block --timeout no late emit"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    export PRTEND_POLL_INTERVAL=2
+    _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
+    counter="$SANDBOX/rs-counter"; printf '0' > "$counter"
+    _prtend_forge_gh_reviews_since() {
+      local n; n=$(cat "$counter"); printf '%d' $(( n + 1 )) > "$counter"
+      if (( n == 0 )); then cat "$FIXTURES/reviews_since.empty.json"
+      else cat "$FIXTURES/reviews_since.one_batch.json"; fi
+    }
+    _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
+    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
+    out="$(prtend_cmd_reviews_poll --pr 7 --block --timeout 1 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 0 "$rc"
+    assert_eq "no late event" "" "$out"
+    assert_eq "cursor not advanced" "" "$(prtend_state_get_cursor 7)"
+  )
+}
+
 case_once_empty
 case_once_one_batch
 case_once_two_batches
@@ -370,6 +425,8 @@ case_bad_pr
 case_mutex
 case_anchor_stale_combinations
 case_already_handled_thread_walk
+case_thread_bodies_hard_failure
+case_block_timeout_no_late_emit
 
 PASS="$(grep -c '^P' "$RESULTS" || true)"
 FAIL="$(grep -c '^F' "$RESULTS" || true)"

@@ -123,8 +123,19 @@ prtend_cmd_reviews_poll() {
       return 0
       ;;
     block)
-      local start="$SECONDS" elapsed remaining nap
+      local start="$SECONDS" elapsed remaining nap first=1
       while :; do
+        # Deadline check fires at the top of every iteration after the first
+        # so a batch that arrives during sleep — at or past the budget — is
+        # NOT emitted (the contract is exit 0 / no output / no cursor write
+        # on timeout, with no peek at one more poll).
+        if (( first == 0 )) && (( saw_timeout == 1 )); then
+          if (( SECONDS - start >= timeout_s )); then
+            return 0
+          fi
+        fi
+        first=0
+
         _PRTEND_REVIEWS_POLL_EMITTED=0
         _reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor" || return $?
         if (( _PRTEND_REVIEWS_POLL_EMITTED > 0 )); then
@@ -140,7 +151,7 @@ prtend_cmd_reviews_poll() {
             return 4
           fi
         fi
-        # Elapsed-time short-circuit on --timeout (clean exit 0, no output).
+        # Pre-sleep deadline short-circuit so we never sleep past the budget.
         if (( saw_timeout == 1 )); then
           elapsed=$(( SECONDS - start ))
           if (( elapsed >= timeout_s )); then
@@ -205,7 +216,7 @@ _reviews_poll_emit_pending() {
 
       _reviews_poll_anchor_stale "$c_path" "$c_line"
       anchor_stale="$_PRTEND_REVIEWS_POLL_RET"
-      _reviews_poll_already_handled "$pr" "$comment_id"
+      _reviews_poll_already_handled "$pr" "$comment_id" || return $?
       already_handled="$_PRTEND_REVIEWS_POLL_RET"
 
       if [[ "$c_line" == "null" || -z "$c_line" ]]; then
@@ -305,9 +316,21 @@ _reviews_poll_already_handled() {
     probe_rc=0
     thread_bodies="$(prtend_forge_review_thread_bodies "$pr" "$comment_id" 2>/dev/null)" \
       || probe_rc=$?
-    if (( probe_rc != 0 )); then
-      thread_bodies=""
-    fi
+    case "$probe_rc" in
+      0)
+        : ;;
+      1)
+        # Documented "id unknown" — shouldn't happen for an id we just got
+        # from `review_comments`, but if it does, treat the thread as empty
+        # and let the downstream rubric escalate.
+        thread_bodies="" ;;
+      *)
+        # Network, auth, or other API failure. Do NOT downgrade to "not
+        # handled" — that would let a watch loop double-post on a thread
+        # that's already been replied to. Propagate so the caller aborts
+        # this poll cycle (no partial cursor advance per Key decisions).
+        return "$probe_rc" ;;
+    esac
     body_cache[$comment_id]="$thread_bodies"
   fi
   if prtend_note_is_handled "$thread_bodies"; then
