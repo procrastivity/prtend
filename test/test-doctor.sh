@@ -517,6 +517,26 @@ case_marker_mismatch() {
   )
 }
 
+# ----------------------------------------------------------------------------
+# Case 17 — Config with an orphaned `- item` under a scalar key is rejected.
+# ----------------------------------------------------------------------------
+case_config_orphan_list_item() {
+  echo "case: config orphan list item"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    install_fake_gh 2.62.0 1 alice
+    load_libs
+    export PRTEND_CONFIG="$SANDBOX/orphan.yml"
+    cp "$FIXTURES/config.orphan_list.txt" "$PRTEND_CONFIG"
+    out="$(prtend_cmd_doctor --check config_readable 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 1 "$rc"
+    assert_eq "status" '"fail"' "$(jq -c '.checks[0].status' <<<"$out")"
+    assert_contains "message" "outside a list block" "$(jq -r '.checks[0].message' <<<"$out")"
+  )
+}
+
 case_all_pass
 case_forge_missing
 case_forge_unauthed
@@ -533,6 +553,7 @@ case_check_subset
 case_check_unknown
 case_marker_v1
 case_marker_mismatch
+case_config_orphan_list_item
 
 PASS="$(grep -c '^P' "$RESULTS" || true)"
 FAIL="$(grep -c '^F' "$RESULTS" || true)"

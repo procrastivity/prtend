@@ -4,7 +4,7 @@
 
 Land the operational health check. `prtend doctor` is what the skill (and the human author) runs to confirm the environment is sane before — or during — a watch session, and what cleans up stale per-PR state files left behind when a watch session ended without a clean `pr_closed` event (machine crash, killed terminal, the user closing a PR through the web UI while no `watch` was attached). Today the only path to discover such drift is to read `<state-dir>` by hand; with `doctor` in place the skill can call one CLI to verify forge auth + cleanup safely, matching the existing `gh extension doctor` / `glab check-update` muscle memory.
 
-This step composes existing primitives only: `prtend_forge_cli_ready` (step 03) for the forge gate, `prtend_forge_pr_state` (step 04) for closed-PR detection, `prtend_state_dir` (step 05) for the state directory, `prtend_state_clear` (step 05) for `--fix` cleanup of stale state files, `prtend_config_resolve` and the config resolution chain (step 12) for the readable-config check, and `prtend_note_marker_version` (step 06) for the marker-version self-check. It introduces no new forge ops, no new state-lib functions, and no new note-lib functions — every primitive is already shipped. The new file is the subcommand itself.
+This step composes existing primitives: `prtend_forge_cli_ready` (step 03) for the readiness gate, `prtend_forge_pr_state` (step 04) for closed-PR detection, `prtend_state_dir` (step 05) for the state directory, `prtend_state_clear` (step 05) for `--fix` cleanup of stale state files, `prtend_config_resolve` and the config resolution chain (step 12) for the readable-config check, and `prtend_note_marker_version` (step 06) for the marker-version self-check. It also adds three small additive primitives to `prtend-forge-lib.bash` — `prtend_forge_cli_installed`, `prtend_forge_cli_version`, `prtend_forge_cli_authed_login` — because `AGENTS.md` requires that all `gh`/`glab` shell-outs live in the forge lib. The new files are the subcommand and its tests; the forge-lib delta is strictly additive (existing functions and signatures unchanged).
 
 The output contract is a single JSON document (not a stream), unlike the watch primitives: `doctor` is a one-shot reporter. See `../cli-contract.md` § "`prtend doctor`" for the exact shape (one `checks[]` array plus `summary` and `fixed[]`), the per-check status enum (`pass` / `warn` / `fail`), and the exit-code table (0 when no `fail` remains, 1 otherwise, 2 on bad flags). Each check has a stable `name` slug; `--check NAME` runs only the named subset, repeatable. `--fix` applies safe repairs and lists them under `fixed[]`.
 
@@ -40,10 +40,11 @@ After this step:
 ## Files to create or modify
 
 - `lib/prtend/prtend-subcommands/doctor.bash` (NEW)
-- `test/fixtures/doctor/` (NEW) — fake-forge readiness/`pr_state` stubs, sample config files (well-formed + malformed), and a small set of pre-seeded state files for stale-detection tests.
-- `test/test-doctor.sh` (NEW) — match `test/test-watch.sh` / `test/test-reviews-poll.sh` harness style: a per-test tmp `PRTEND_STATE_DIR` plus function overrides for `prtend_forge_cli_ready` and `prtend_forge_pr_state`.
+- `lib/prtend/prtend-forge-lib.bash` (additive) — three new public primitives: `prtend_forge_cli_installed` (dispatch → `_*_cli_installed` per forge; returns 0 if binary on PATH, 3 if missing), `prtend_forge_cli_version` (echoes the dotted-numeric version, exit 1 on missing-binary or unparseable banner), `prtend_forge_cli_authed_login` (echoes login on stdout exit 0, exit 1 + first stderr line on failure). No existing functions or signatures change.
+- `test/fixtures/doctor/` (NEW) — sample config files (well-formed, malformed grammar, orphaned list item) plus PR-state fixtures for stale-detection tests.
+- `test/test-doctor.sh` (NEW) — match `test/test-watch.sh` / `test/test-reviews-poll.sh` harness style: a per-test tmp `PRTEND_STATE_DIR`, a per-test PATH-shimmed fake `gh`, and function overrides for `_prtend_forge_gh_pr_state` and `prtend_state_clear` where needed.
 
-No changes to `bin/prtend`, `prtend-lib.bash`, `prtend-forge-lib.bash`, `prtend-state-lib.bash`, `prtend-notes-lib.bash`, `prtend-signature-lib.bash`, the existing subcommand files (`ci_watch.bash`, `reviews_poll.bash`, `watch.bash`, `note_post.bash`, `defer_write.bash`, `pr_open.bash`, `detect.bash`, `config.bash`), or any file under `docs/`. If you find yourself touching any of those, you've drifted out of scope.
+No changes to `bin/prtend`, `prtend-lib.bash`, `prtend-state-lib.bash`, `prtend-notes-lib.bash`, `prtend-signature-lib.bash`, the existing subcommand files (`ci_watch.bash`, `reviews_poll.bash`, `watch.bash`, `note_post.bash`, `defer_write.bash`, `pr_open.bash`, `detect.bash`, `config.bash`), or any file under `docs/` apart from this step file. If you find yourself touching any of those, you've drifted out of scope.
 
 ## Implementation
 
@@ -98,12 +99,13 @@ Call `prtend_config_resolve` (already returns the active config path or empty). 
 
 - If the file doesn't exist (the resolution chain returned a stale candidate path), `status:"fail", message:"<path> does not exist"`, `fixable=false`.
 - If the file exists but isn't readable (no `-r` permission), `status:"fail", message:"<path>: permission denied"`, `fixable=false`.
-- Otherwise run a **structural scan** of the file (not a `prtend_config_get` probe). The config lib's scalar reader (`lib/prtend/prtend-lib.bash:191`) is a `grep`/`sed` lookup — it silently returns rc 0 with empty output on malformed input — so a `prtend_config_get` probe cannot distinguish "missing key" from "broken file." The scan is a pure-Bash line walk that accepts only these shapes per non-blank, non-comment line:
-  - Top-level key: `^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$` (list header) or `^[A-Za-z_][A-Za-z0-9_]*:[[:space:]].*$` (scalar).
-  - List item (under the most recent list header only): `^[[:space:]]+-[[:space:]]+.*$`.
-  - Blank line: `^[[:space:]]*$`.
+- Otherwise run a **structural scan** of the file (not a `prtend_config_get` probe). The config lib's scalar reader (`lib/prtend/prtend-lib.bash:191`) is a `grep`/`sed` lookup — it silently returns rc 0 with empty output on malformed input — so a `prtend_config_get` probe cannot distinguish "missing key" from "broken file." The scan is a pure-Bash line walk that tracks list-header context via an `in_list` state variable. Top-level list headers (`key:` with nothing after the colon) set `in_list=1`; top-level scalar keys (`key: value`) clear it. List items are only valid while `in_list=1`; an indented `- item` outside an open list block is the same garbage that `prtend_config_list_get`'s state machine silently drops, and the scan rejects it explicitly. Accepted line shapes:
+  - Top-level list header: `^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$` (sets `in_list=1`).
+  - Top-level scalar: `^[A-Za-z_][A-Za-z0-9_]*:[[:space:]].*$` (clears `in_list`).
+  - List item (only valid when `in_list=1`): `^[[:space:]]+-[[:space:]]+.*$`.
+  - Blank line: `^[[:space:]]*$` (does not change `in_list`).
   - Comment: `^[[:space:]]*#.*$`.
-  Any line outside this grammar → `status:"fail", message:"<path>:<line-no>: malformed line"`, `fixable=false`. On a clean walk → `status:"pass", message:"Loaded from <path>"`, `fixable=false`.
+  An item outside a list block → `status:"fail", message:"<path>:<line-no>: list item outside a list block"`. Any other unparseable line → `status:"fail", message:"<path>:<line-no>: malformed line"`. `fixable=false` in both cases. On a clean walk → `status:"pass", message:"Loaded from <path>"`, `fixable=false`.
 
 The scan deliberately mirrors what `prtend_config_get` / `prtend_config_list_get` actually parse — it doesn't add structural assertions the readers wouldn't enforce. It exists to catch the "user hand-edited the file and typoed it" case that the readers swallow.
 
@@ -179,6 +181,7 @@ test/test-doctor.sh
 14. **`--check` unknown name** — `prtend doctor --check bogus` exits 2 with stderr `prtend: doctor: unknown check 'bogus'`. No stdout.
 15. **Marker version tautology** — confirm `marker_consistency` is `pass` with `message:"Only marker v1 in use"` under default conditions.
 16. **Marker version mismatch** — override `prtend_note_marker_version` in the test to return `v999`. `marker_consistency` → `warn`, `fixable=false`. Exit 0 (warn).
+17. **Config with orphaned list item** — write a file whose first non-blank line is a top-level scalar (`watch_strategy: blocking`) followed by an indented `- alice`. `config_readable` → `fail`, message has the form `<path>:<line-no>: list item outside a list block`. Exit 1. Verifies the list-header-context rule.
 
 Reuse the fake-forge harness pattern from `test/test-watch.sh:30-80`; the harness should set `PRTEND_STATE_DIR` to a per-test tmp dir and override forge entry points by sourcing replacements **after** sourcing the real `prtend-forge-lib.bash`. Override `gh` / `glab` binaries via a per-test `PATH` shim that emits the version line / auth-status line the test wants (most cases need only `prtend_forge_cli_ready` and `prtend_forge_pr_state` overrides; the version test additionally needs a `gh` shim emitting the desired version banner).
 
@@ -188,6 +191,7 @@ Reuse the fake-forge harness pattern from `test/test-watch.sh:30-80`; the harnes
 - [ ] All flag-parsing rejections behave as specified (bad `--check NAME`, unknown options).
 - [ ] `test/test-doctor.sh` exists, sources the harness pattern, exercises all 16 numbered cases above, and exits 0.
 - [ ] `prtend_forge_cli_ready` / `prtend_forge_pr_state` / `prtend_state_dir` / `prtend_state_path` / `prtend_state_clear` / `prtend_config_resolve` / `prtend_note_marker_version` are called as their existing signatures (no shimming, no flag additions, no new optional parameters).
-- [ ] No diff to `bin/prtend`, `prtend-lib.bash`, `prtend-forge-lib.bash`, `prtend-state-lib.bash`, `prtend-notes-lib.bash`, `prtend-signature-lib.bash`, `ci_watch.bash`, `reviews_poll.bash`, `watch.bash`, `note_post.bash`, `defer_write.bash`, `pr_open.bash`, `detect.bash`, `config.bash`, or any file under `docs/`.
-- [ ] `git status` shows only: `lib/prtend/prtend-subcommands/doctor.bash`, `test/fixtures/doctor/...`, `test/test-doctor.sh`.
+- [ ] `prtend_forge_cli_installed` / `prtend_forge_cli_version` / `prtend_forge_cli_authed_login` are added to `prtend-forge-lib.bash`, each with `gh` and `glab` private helpers (`_prtend_forge_gh_*` / `_prtend_forge_gl_*`) so the forge-lib stays the only file shelling out to `gh` / `glab` per `AGENTS.md`.
+- [ ] No diff to `bin/prtend`, `prtend-lib.bash`, `prtend-state-lib.bash`, `prtend-notes-lib.bash`, `prtend-signature-lib.bash`, `ci_watch.bash`, `reviews_poll.bash`, `watch.bash`, `note_post.bash`, `defer_write.bash`, `pr_open.bash`, `detect.bash`, `config.bash`, or any file under `docs/` apart from this step file.
+- [ ] `git status` shows only: `lib/prtend/prtend-subcommands/doctor.bash`, `lib/prtend/prtend-forge-lib.bash`, `test/fixtures/doctor/...`, `test/test-doctor.sh`.
 - [ ] One commit on the `step-17-doctor` branch: `feat(doctor): add doctor health-check subcommand`.

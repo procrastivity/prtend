@@ -192,6 +192,78 @@ prtend_forge_cli_ready() {
   prtend_forge_dispatch cli_ready
 }
 
+# -- cli installed --------------------------------------------------------
+
+# Returns 0 if the active forge's CLI binary is on PATH, else 3 (CLI missing).
+prtend_forge_cli_installed() {
+  prtend_forge_dispatch cli_installed "$@"
+}
+
+_prtend_forge_gh_cli_installed() {
+  command -v gh >/dev/null 2>&1 || return 3
+}
+
+_prtend_forge_gl_cli_installed() {
+  command -v glab >/dev/null 2>&1 || return 3
+}
+
+# -- cli version ----------------------------------------------------------
+
+# Echoes the active forge CLI's semver (e.g. "2.62.0" or "2.62.0-rc.1").
+# Exit 0 + version on success; exit 1 + empty stdout when the binary is
+# missing or its --version output can't be parsed.
+prtend_forge_cli_version() {
+  prtend_forge_dispatch cli_version "$@"
+}
+
+_prtend_forge_gh_cli_version() {
+  command -v gh >/dev/null 2>&1 || return 1
+  local line ver
+  line="$(gh --version 2>/dev/null | head -n 1)"
+  ver="$(printf '%s\n' "$line" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?' | head -n 1)"
+  if [[ -z "$ver" ]]; then return 1; fi
+  printf '%s\n' "$ver"
+}
+
+_prtend_forge_gl_cli_version() {
+  command -v glab >/dev/null 2>&1 || return 1
+  local line ver
+  line="$(glab --version 2>/dev/null | head -n 1)"
+  ver="$(printf '%s\n' "$line" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?' | head -n 1)"
+  if [[ -z "$ver" ]]; then return 1; fi
+  printf '%s\n' "$ver"
+}
+
+# -- cli authed-login -----------------------------------------------------
+
+# Echoes the logged-in username on stdout, exit 0 on success.
+# Exit 1 + empty stdout with first line of CLI stderr on stderr otherwise.
+prtend_forge_cli_authed_login() {
+  prtend_forge_dispatch cli_authed_login "$@"
+}
+
+_prtend_forge_gh_cli_authed_login() {
+  command -v gh >/dev/null 2>&1 || return 1
+  local out rc=0
+  out="$(gh auth status 2>&1)" || rc=$?
+  if (( rc != 0 )); then
+    printf '%s\n' "$out" | head -n 1 >&2
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Eo 'as [^ ]+' | head -n 1 | awk '{print $2}'
+}
+
+_prtend_forge_gl_cli_authed_login() {
+  command -v glab >/dev/null 2>&1 || return 1
+  local out rc=0
+  out="$(glab auth status 2>&1)" || rc=$?
+  if (( rc != 0 )); then
+    printf '%s\n' "$out" | head -n 1 >&2
+    return 1
+  fi
+  printf '%s\n' "$out" | grep -Eo 'as [^ ]+' | head -n 1 | awk '{print $2}'
+}
+
 # -- branch ----------------------------------------------------------------
 
 prtend_forge_current_branch() {

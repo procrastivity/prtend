@@ -82,6 +82,13 @@ _doctor_forge_cli_name() {
   esac
 }
 
+# Probe whether the active forge's CLI binary is installed. Returns 0 when
+# installed, 1 when missing or no forge resolved. All `command -v gh`/`glab`
+# calls stay inside forge-lib via prtend_forge_cli_installed.
+_doctor_cli_installed() {
+  prtend_forge_cli_installed >/dev/null 2>&1
+}
+
 # -- version compare -------------------------------------------------------
 
 # _doctor_version_ge <a> <b>  → exit 0 if a >= b, else exit 1
@@ -117,14 +124,17 @@ _doctor_check_forge_cli_installed() {
     _doctor_row forge_cli_installed fail "unknown forge '$forge'" false
     return 0
   fi
-  if ! command -v "$cli" >/dev/null 2>&1; then
+  if ! _doctor_cli_installed; then
     _doctor_row forge_cli_installed fail "$cli not found on PATH" false
     return 0
   fi
-  local ver_line
-  ver_line="$("$cli" --version 2>/dev/null | head -n 1)"
-  if [[ -z "$ver_line" ]]; then ver_line="$cli (version unknown)"; fi
-  _doctor_row forge_cli_installed pass "$ver_line detected" false
+  local ver
+  ver="$(prtend_forge_cli_version 2>/dev/null)" || ver=""
+  if [[ -n "$ver" ]]; then
+    _doctor_row forge_cli_installed pass "$cli $ver detected" false
+  else
+    _doctor_row forge_cli_installed pass "$cli detected" false
+  fi
 }
 
 _doctor_check_forge_cli_authed() {
@@ -133,18 +143,15 @@ _doctor_check_forge_cli_authed() {
     _doctor_row forge_cli_authed warn "forge CLI not installed; skipped" false
     return 0
   fi
-  if ! command -v "$cli" >/dev/null 2>&1; then
+  if ! _doctor_cli_installed; then
     _doctor_row forge_cli_authed warn "forge CLI not installed; skipped" false
     return 0
   fi
-  local out rc=0
-  # gh / glab both print auth status to stderr; capture both.
-  out="$("$cli" auth status 2>&1)" || rc=$?
+  local login err err_file rc=0
+  err_file="$(mktemp -t prtend-doctor-auth-err.XXXXXX)"
+  login="$(prtend_forge_cli_authed_login 2>"$err_file")" || rc=$?
+  err="$(cat "$err_file")"; rm -f "$err_file"
   if (( rc == 0 )); then
-    local login
-    # Try to extract a login from the auth status output. gh format:
-    # "  ✓ Logged in to github.com as <user>". glab: "Logged in to ... as <user>"
-    login="$(printf '%s\n' "$out" | grep -Eo 'as [^ ]+' | head -n 1 | awk '{print $2}')"
     if [[ -n "$login" ]]; then
       _doctor_row forge_cli_authed pass "Authenticated as $login" false
     else
@@ -153,7 +160,7 @@ _doctor_check_forge_cli_authed() {
     return 0
   fi
   local msg
-  msg="$(printf '%s\n' "$out" | head -n 1)"
+  msg="$(printf '%s\n' "$err" | head -n 1)"
   if [[ -z "$msg" ]]; then msg="$cli auth status failed"; fi
   _doctor_row forge_cli_authed fail "$msg" false
 }
@@ -164,19 +171,16 @@ _doctor_check_forge_cli_version() {
     _doctor_row forge_cli_version warn "forge CLI not installed; skipped" false
     return 0
   fi
-  if ! command -v "$cli" >/dev/null 2>&1; then
+  if ! _doctor_cli_installed; then
     _doctor_row forge_cli_version warn "forge CLI not installed; skipped" false
     return 0
   fi
-  local ver_line floor
-  ver_line="$("$cli" --version 2>/dev/null | head -n 1)"
+  local ver floor
+  ver="$(prtend_forge_cli_version 2>/dev/null)" || ver=""
   case "$forge" in
     github) floor="$PRTEND_GH_MIN_VERSION" ;;
     gitlab) floor="$PRTEND_GLAB_MIN_VERSION" ;;
   esac
-  # Extract first dotted-numeric token (optionally with -prerelease suffix).
-  local ver
-  ver="$(printf '%s\n' "$ver_line" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?' | head -n 1)"
   if [[ -z "$ver" ]]; then
     _doctor_row forge_cli_version warn "could not parse $cli version" false
     return 0
@@ -189,21 +193,37 @@ _doctor_check_forge_cli_version() {
 }
 
 # Pure-Bash structural scan that mirrors the grammar `prtend_config_get` /
-# `prtend_config_list_get` parse: top-level keys, list items, blanks, comments.
-# Returns "" on a clean scan, or "<line-no>: <reason>" on the first violation.
+# `prtend_config_list_get` parse: top-level scalar keys, top-level list
+# headers, list items (only directly under a list header), blanks, comments.
+# Tracks list-header context: an indented `- item` line outside an open list
+# block is rejected as malformed (matches what `prtend_config_list_get`'s
+# state machine would silently drop). Returns "" on a clean scan, or
+# "<line-no>: <reason>" on the first violation.
 _doctor_scan_config() {
   local path="$1"
-  local lineno=0 line
+  local lineno=0 line in_list=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     lineno=$(( lineno + 1 ))
-    # Blank.
+    # Blank — stays inside the current list block if any.
     if [[ "$line" =~ ^[[:space:]]*$ ]]; then continue; fi
     # Comment.
     if [[ "$line" =~ ^[[:space:]]*# ]]; then continue; fi
-    # Top-level key (list header or scalar).
-    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*:([[:space:]].*|[[:space:]]*)$ ]]; then continue; fi
-    # Indented list item.
-    if [[ "$line" =~ ^[[:space:]]+-[[:space:]]+.*$ ]]; then continue; fi
+    # Top-level list header (`key:` with no value on the same line).
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$ ]]; then
+      in_list=1
+      continue
+    fi
+    # Top-level scalar (`key: value`).
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*:[[:space:]].*$ ]]; then
+      in_list=0
+      continue
+    fi
+    # Indented list item — only valid inside an open list block.
+    if [[ "$line" =~ ^[[:space:]]+-[[:space:]]+.*$ ]]; then
+      if (( in_list == 1 )); then continue; fi
+      printf '%d: list item outside a list block\n' "$lineno"
+      return 0
+    fi
     printf '%d: malformed line\n' "$lineno"
     return 0
   done <"$path"
