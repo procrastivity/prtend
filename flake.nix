@@ -15,6 +15,7 @@
             pkgs.git
             pkgs.shellcheck
             pkgs.pre-commit
+            pkgs.git-cliff
           ];
         };
       });
