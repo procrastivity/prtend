@@ -1,6 +1,6 @@
 {
   "name": "prtend",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Tend your PR while you pretend you're not procrastinating. Subscribes to CI and review events after a push, fixes what can be fixed, resolves review comments deterministically.",
   "homepage": "https://github.com/procrastivity/prtend",
   "author": {
