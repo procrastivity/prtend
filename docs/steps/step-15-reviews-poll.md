@@ -26,7 +26,7 @@ Required on the host for smoke tests: the forge CLI matching the checkout (`gh` 
 After this step:
 
 - `bin/prtend reviews-poll --pr N --block` reads the recorded cursor, calls `prtend_forge_reviews_since` once, and:
-  - if any batches are returned, emits one JSON object per batch on stdout, advances the cursor, exits 0;
+  - if any batches are returned, emits **exactly one** JSON object (the earliest batch) on stdout, advances the cursor past *just that batch* using its per-batch `resume_cursor`, exits 0. Any remaining batches stay in the queue for the next call. This matches `../cli-contract.md` § "Output discipline": streamed commands return exactly one document per call in blocking modes.
   - otherwise enters a poll loop until at least one batch arrives, then emits and exits 0.
 - `bin/prtend reviews-poll --pr N --once` makes a single call and emits **zero or more** JSON events covering anything pending since the cursor. Exits 0 either way. Does not block.
 - `bin/prtend reviews-poll --pr N --block --timeout S` is `--block` wrapped in a wall-clock bound. On timeout it exits 0 with **no output**, no cursor write.
@@ -34,7 +34,7 @@ After this step:
 - Each emitted event matches `../cli-contract.md` § "`prtend reviews-poll`" → "Output": `{type:"review_batch", pr, batch_id, submitted_at, author, review_state, comments[], next_cursor}`. `comments[]` carries fully-projected comment objects (`comment_id`, `author`, `body`, `path`, `line`, `anchor_stale`, `already_handled`, `created_at`).
 - `anchor_stale` is true when the comment's `(path, line)` no longer exists at the current HEAD; false otherwise. Computed locally by diffing, never trusted from the forge.
 - `already_handled` is true when the comment thread already contains a prtend marker. Computed by calling `prtend_forge_review_thread_bodies "$pr" "$comment_id"` (the same idempotency primitive `note-post` uses; see `lib/prtend/prtend-subcommands/note_post.bash:122`) and running the concatenated thread bodies through `prtend_note_is_handled`. The marker lives in the *reply* `note-post` writes — sibling walks of the batch's `comment_ids` would miss replies posted to the same thread but outside the current review (the common case on GitHub).
-- `next_cursor` is the cursor the *next* call should resume from — for GitHub the largest review id observed across the emitted batches; for GitLab the latest settled-note ISO timestamp. The same value is written to state when `--cursor` was not passed.
+- Each event's `next_cursor` field is **this batch's own** resume token (`resume_cursor` from the forge), not the across-call max. A consumer that picks one event and drops the rest can pass its `next_cursor` on the next call and pick up strictly after the chosen batch. The state cursor (written when `--cursor` was not passed) is the `next_cursor` of the **last emitted** event — which equals the across-call `next_cursor` only when `--once` emits everything.
 - PR-closed-mid-poll is observable. If the PR transitions to `closed`/`merged` while the loop is waiting for the first batch, `reviews-poll` exits 4 with stderr `prtend: PR <n> closed during poll` and no stdout. Symmetric to ci-watch's PR-closed contract.
 - No new forge entry points, no new state-lib functions, no changes to the notes lib. The only new file is the subcommand.
 
@@ -43,8 +43,9 @@ After this step:
 - `lib/prtend/prtend-subcommands/reviews_poll.bash` (NEW)
 - `test/fixtures/reviews_poll/` (NEW)
 - `test/test-reviews-poll.sh` (NEW) — match `test/test-ci-watch.sh` harness style.
+- `lib/prtend/prtend-forge-lib.bash` (additive only) — both `_prtend_forge_gh_reviews_since` and `_prtend_forge_gl_reviews_since` must include a per-batch `resume_cursor` field on each emitted batch. For GitHub it's the batch's review id; for GitLab it's the batch's max settled-note timestamp (the same value that, max'd across all batches, becomes the across-call `next_cursor`). The across-call `next_cursor` keeps its current shape — the new field is strictly additive. The subcommand needs it to advance state past *exactly* the batches it emits when `--block` truncates a multi-batch response (see "Key decisions" → "Blocking modes emit exactly one event per call").
 
-No changes to `bin/prtend`, `prtend-lib.bash`, `prtend-state-lib.bash`, `prtend-notes-lib.bash`, `prtend-forge-lib.bash`, `prtend-signature-lib.bash`, the `config` / `defer-write` / `note-post` / `pr-open` / `ci-watch` subcommand files, or `docs/`. If you find yourself touching them, you've drifted out of scope.
+No changes to `bin/prtend`, `prtend-lib.bash`, `prtend-state-lib.bash`, `prtend-notes-lib.bash`, `prtend-signature-lib.bash`, the `config` / `defer-write` / `note-post` / `pr-open` / `ci-watch` subcommand files, or `docs/cli-contract.md` (the per-event `next_cursor` semantics described in "Key decisions" already match the contract). If you find yourself touching any of those, you've drifted out of scope.
 
 ## Implementation
 
@@ -75,7 +76,7 @@ Composition (in order):
 
 4. **Branch on mode:**
 
-   - **`--once`:** call `_reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor"` exactly once. The helper does the `reviews_since` → `review_comments` → projection → emit dance described below. Whatever it returns (0 batches or N batches), exit 0 unless the call surfaced exit 4 (PR closed → propagate).
+   - **`--once`:** call `_reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor" 0` exactly once (the trailing `0` means "no max-batches cap — emit everything pending"). The helper does the `reviews_since` → `review_comments` → projection → emit dance described below. Whatever it returns (0 batches or N batches), exit 0 unless the call surfaced exit 4 (PR closed → propagate).
    - **`--block` (with or without `--timeout`):** track elapsed time in-process — do *not* wrap the loop in `timeout(1)`. Capture `start="$SECONDS"` before entering the loop. Loop body, with the deadline check guarding both ends so a batch arriving *during sleep* at or past the budget is **not** emitted:
      1. If this is a subsequent iteration (not the first) and `--timeout` is present and `(( SECONDS - start >= timeout_seconds ))`, return 0 with no output and no cursor write. (The first iteration always runs — `start="$SECONDS"` immediately precedes it, so the deadline can't have passed yet.)
      2. Call the same helper.
@@ -86,10 +87,10 @@ Composition (in order):
 
      This mirrors `_prtend_forge_ci_watch_block_common` in `lib/prtend/prtend-forge-lib.bash:1140` — same elapsed-time pattern, same 124-style semantics absorbed locally without the `timeout(1)` wrap. The post-sleep / pre-emit deadline check (step 1) is the difference: ci-watch's loop body is forge-side and exits 124 on the same check before each sample, so reviews-poll's loop has to do the same.
 
-5. **Helper `_reviews_poll_emit_pending <pr> <cursor> <write_cursor>`** (private to this file, prefix `_reviews_poll_`):
+5. **Helper `_reviews_poll_emit_pending <pr> <cursor> <write_cursor> <max_batches>`** (private to this file, prefix `_reviews_poll_`). `max_batches == 0` means "emit everything pending"; any positive integer caps emission at that count.
    - Call `prtend_forge_reviews_since "$pr" "$cursor"` and capture the `{batches, next_cursor}` JSON. Propagate any non-zero forge exit code.
-   - Read `count = batches | length`. If 0, return 0 without emitting or writing the cursor (the caller decides whether to loop).
-   - For each batch (0..count-1):
+   - Read `total = batches | length`. If 0, return 0 without emitting or writing the cursor (the caller decides whether to loop). Otherwise compute `emit_count = max_batches > 0 && max_batches < total ? max_batches : total`.
+   - For each batch (0..emit_count-1):
      - Extract `batch_id`, `submitted_at`, `author`, `state` (review_state), `comment_ids[]`.
      - Call `prtend_forge_review_comments "$pr" "$batch_id"` → `{comments: [...]}`. Note: for GitHub the second argument is the review id (== `batch_id`); for GitLab it is the discussion id (also `batch_id`). The dispatch is identical from the subcommand's perspective.
      - For each comment in `comments[]`:
@@ -102,9 +103,9 @@ Composition (in order):
        - `batch_id`, `submitted_at`, `author`: from the batch
        - `review_state`: from the batch's `state` field (rename: contract field is `review_state`, forge lib emits `state`)
        - `comments`: the projected comments array
-       - `next_cursor`: the `next_cursor` from the `reviews_since` response (same value for every batch in this call — the cursor advances only past the *last* batch)
+       - `next_cursor`: this batch's own `resume_cursor` from the forge. Each event carries its own — a consumer can drop later events and still resume from any single observed event's `next_cursor`. Fall back to the across-call `next_cursor` only if a forge ever stops emitting `resume_cursor`.
      - Emit one compact JSON object on stdout.
-   - After all batches emitted: if `write_cursor == true`, call `prtend_state_set_cursor "$pr" "$next_cursor"`. Return 0.
+   - After the loop: if `write_cursor == 1` AND at least one batch was emitted, call `prtend_state_set_cursor "$pr" "$last_resume_cursor"` — the `resume_cursor` of the *last emitted* batch. (When `max_batches` truncates the response, this advances state past the emitted batches only, leaving the rest for the next call.) Return 0.
 
 ### Anchor staleness
 
@@ -119,9 +120,14 @@ This is a deliberately cheap check — not a full diff-rename detection, not a l
 
 Cache the per-`path` result inside `_reviews_poll_emit_pending` (associative array `path → "0"|"1"` for existence, and `path → <int>` for line count) so a batch with N comments on the same file pays the `git show` cost once.
 
-### `lib/prtend/prtend-forge-lib.bash` — no changes
+### `lib/prtend/prtend-forge-lib.bash` — one additive field per batch
 
-Every forge primitive this subcommand needs is already public (`prtend_forge_reviews_since`, `prtend_forge_review_comments`, `prtend_forge_comment_body`, `prtend_forge_pr_state`, `prtend_forge_cli_ready`). If you find yourself adding a new private — stop. The shape mismatch (forge lib's `state` vs contract's `review_state`, forge lib's `anchor_stale: false` vs computed) is intentionally absorbed by the subcommand, not pushed into the lib. The lib's contract is "canonical forge data"; the subcommand's contract is "the CLI output shape."
+Add a `resume_cursor` field to each batch object emitted by `_prtend_forge_gh_reviews_since` and `_prtend_forge_gl_reviews_since`. The field is the per-batch resume token — what the *next* `reviews_since` call should pass to skip past this batch alone:
+
+- GitHub: the batch's review id (cursors are review ids). `resume_cursor: $id` next to `batch_id`.
+- GitLab: the batch's max settled-note timestamp, ISO-formatted. The across-call `next_cursor` is `max(.[].resume_cursor)` (semantically identical to the previous `max(._max_t)`).
+
+Everything else stays unchanged — `next_cursor` keeps its across-call meaning, the existing batch fields keep their shapes, no new dispatch entries. The subcommand needs the per-batch token to honor the streamed-command contract (`../cli-contract.md` § "Output discipline"): in `--block` mode it emits one batch and advances state past *just that batch*, leaving the rest for the next call. With only the across-call `next_cursor` available, truncating in `--block` would silently drop unemitted batches by advancing past them. The shape mismatch absorption (`state` → `review_state`, `anchor_stale: false` → computed) still belongs in the subcommand; this one field can't be computed there because GitLab's max-note timestamp isn't in any other public projection.
 
 ### `lib/prtend/prtend-state-lib.bash` — no changes
 
@@ -130,7 +136,8 @@ Every forge primitive this subcommand needs is already public (`prtend_forge_rev
 ### Key decisions
 
 - **`--cursor CURSOR` is read-only.** When the caller passes a cursor explicitly, prtend reads from it but does not write back. This matches `../cli-contract.md` § "`prtend reviews-poll`" → "Flags". The semantics are "the caller is managing cursor on its own"; silently overwriting state would surprise that caller on the next implicit-cursor call.
-- **`next_cursor` is the same value in every event of a single call.** The forge lib computes one `next_cursor` per `reviews_since` invocation; we emit it on every batch in that response so a consumer that processes one event at a time can drop the rest and still resume correctly from any single observed event. Don't try to compute per-batch cursors — that's not what the forge lib returns and the contract treats it as a single resume token.
+- **Blocking modes emit exactly one event per call.** `../cli-contract.md` § "Output discipline" → "Streamed commands" says blocking modes return exactly one JSON document per call (only `--once` may stream multiple). When `reviews_since` returns N>1 batches and we're in `--block`, the helper emits only the earliest and writes the state cursor as *that batch's* `resume_cursor`, leaving the rest for the next call. Emitting all N would (a) violate the contract and (b) hand the skill a fan-out it has to demultiplex; emitting one keeps the watch multiplexer (step 16) symmetric with `ci-watch`.
+- **Each event's `next_cursor` is its own batch's `resume_cursor`, not the across-call max.** A consumer that processes one event and drops the rest can pass that event's `next_cursor` on the next call and pick up strictly after the chosen batch. The state cursor (when `--cursor` was not passed) is the `next_cursor` of the **last emitted** event — equal to the across-call `next_cursor` only when `--once` emits everything pending. The per-batch `resume_cursor` is added by the forge lib precisely so the subcommand can do this; computing it locally is impossible on GitLab (max settled-note timestamp isn't in any other public projection).
 - **Per-batch second call to `review_comments` is unavoidable on GitHub.** The reviews endpoint returns batch metadata; comments require a follow-up call per review id. On GitLab the discussion endpoint already returns notes, but the canonical `_prtend_forge_gl_review_comments` still re-fetches the discussion by id for shape symmetry. Don't try to optimize by reading the GitLab discussions response twice in the subcommand — the forge lib is the right place to dedupe that, and it's already a separate step's concern.
 - **`already_handled` uses `prtend_forge_review_thread_bodies`, not a sibling walk of the batch's `comment_ids`.** `note-post` writes the marker to a *reply* keyed by the original comment id — on GitHub that reply is part of the PR-level review-comments stream and does NOT appear in the source review's `comment_ids` (and won't on subsequent reviews either). The thread-bodies primitive is the same one `note_post.bash:122` uses for its own double-post guard; reusing it keeps the "what counts as handled" rule in exactly one place. A sibling walk would miss the common case (prior run replied via `note-post`, current run re-polls the same review) and let the watch loop double-post.
 - **The thread-bodies fetch includes the reviewer's own comment body.** `prtend_forge_review_thread_bodies` concatenates root + replies, so a human who quotes the marker into the original comment will register as handled. That's the conservative call — we won't double-post — and it matches `note-post`'s own behavior. The decision rubric handles the surprise case; the CLI just reports.
@@ -161,7 +168,8 @@ Test cases (one assertion block each):
 
 1. `--once` with no prior cursor, forge returns `reviews_since.empty.json` → no output, cursor not written, exit 0.
 2. `--once` with prior cursor `"5"`, forge returns `reviews_since.one_batch.json` (one batch, two comments; one anchor is stale; the second comment's thread contains a marker-bearing reply, surfaced via the mocked `review_thread_bodies`) → emits one event with `comments[0].anchor_stale=true`, `comments[1].already_handled=true`, cursor written to the `next_cursor` from the response.
-3. `--once` with prior cursor and `reviews_since.two_batches.json` → emits two events on stdout, both carry the same `next_cursor`, cursor written once.
+3. `--once` with prior cursor and `reviews_since.two_batches.json` → emits two events on stdout. Each event's `next_cursor` is its own batch's `resume_cursor` (first event carries the first batch's resume_cursor, second event the second's). State cursor written once, equal to the last event's `next_cursor`.
+3a. `--block` with `reviews_since.two_batches.json` → emits **exactly one** event (the earliest batch). State cursor advances to the first batch's `resume_cursor` only, leaving the second batch for the next call.
 4. `--once --cursor abc` with `reviews_since.one_batch.json` → emits one event, cursor NOT written to state.
 5. `--block` with empty first poll, then one batch on the second poll → emits one event, exits 0. (`PRTEND_POLL_INTERVAL=0`.)
 6. `--block --timeout 1` with always-empty polls → exits 0 with no output, no cursor write.

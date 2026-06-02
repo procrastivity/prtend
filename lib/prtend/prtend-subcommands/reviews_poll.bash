@@ -118,8 +118,9 @@ prtend_cmd_reviews_poll() {
   # 4. Branch on mode.
   case "$mode" in
     once)
+      # max_batches=0 → unlimited: --once emits everything pending in one call.
       _PRTEND_REVIEWS_POLL_EMITTED=0
-      _reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor" || return $?
+      _reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor" 0 || return $?
       return 0
       ;;
     block)
@@ -136,8 +137,10 @@ prtend_cmd_reviews_poll() {
         fi
         first=0
 
+        # max_batches=1 → blocking mode emits exactly one document per call
+        # (cli-contract.md § "Output discipline" → "Streamed commands").
         _PRTEND_REVIEWS_POLL_EMITTED=0
-        _reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor" || return $?
+        _reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor" 1 || return $?
         if (( _PRTEND_REVIEWS_POLL_EMITTED > 0 )); then
           return 0
         fi
@@ -170,16 +173,19 @@ prtend_cmd_reviews_poll() {
   esac
 }
 
-# _reviews_poll_emit_pending <pr> <cursor> <write_cursor>
-#   - One reviews_since call → zero or more {type:"review_batch", ...} on stdout.
+# _reviews_poll_emit_pending <pr> <cursor> <write_cursor> <max_batches>
+#   - One reviews_since call → up to max_batches {type:"review_batch", ...}
+#     events on stdout (max_batches == 0 means "all pending").
 #   - Sets _PRTEND_REVIEWS_POLL_EMITTED to the number of batches emitted.
 #   - Writes cursor to state iff write_cursor == 1 AND at least one batch
-#     was emitted. (A zero-batch call must not advance the cursor — the next
-#     call needs to retry from the same point.)
+#     was emitted. The cursor written is the per-batch `resume_cursor` of
+#     the LAST emitted batch — so the next call resumes after that batch
+#     even if `max_batches` truncated the response. (A zero-batch call must
+#     not advance the cursor.)
 _reviews_poll_emit_pending() {
-  local pr="$1" cursor="$2" write_cursor="$3"
-  local reviews_json batches next_cursor count i
-  local batch_id submitted_at author review_state
+  local pr="$1" cursor="$2" write_cursor="$3" max_batches="${4:-0}"
+  local reviews_json batches total emit_count next_cursor last_resume_cursor i
+  local batch_id submitted_at author review_state batch_resume_cursor
   local comments_json comments_count j
   local comment_id c_author c_body c_path c_line c_created
   local anchor_stale already_handled
@@ -191,16 +197,28 @@ _reviews_poll_emit_pending() {
   reviews_json="$(prtend_forge_reviews_since "$pr" "$cursor")" || return $?
   batches="$(printf '%s' "$reviews_json" | jq -c '.batches // []')"
   next_cursor="$(printf '%s' "$reviews_json" | jq -r '.next_cursor // ""')"
-  count="$(printf '%s' "$batches" | jq 'length')"
-  if (( count == 0 )); then
+  total="$(printf '%s' "$batches" | jq 'length')"
+  if (( total == 0 )); then
     return 0
   fi
+  if (( max_batches > 0 && max_batches < total )); then
+    emit_count="$max_batches"
+  else
+    emit_count="$total"
+  fi
 
-  for ((i=0; i<count; i++)); do
+  last_resume_cursor=""
+  for ((i=0; i<emit_count; i++)); do
     batch_id="$(printf '%s' "$batches" | jq -r ".[$i].batch_id")"
     submitted_at="$(printf '%s' "$batches" | jq -r ".[$i].submitted_at // \"\"")"
     author="$(printf '%s' "$batches" | jq -r ".[$i].author // \"\"")"
     review_state="$(printf '%s' "$batches" | jq -r ".[$i].state // \"commented\"")"
+    # Per-batch resume token. Forge guarantees the field; fall back to the
+    # across-call next_cursor only if a forge ever stops emitting it.
+    batch_resume_cursor="$(printf '%s' "$batches" | jq -r ".[$i].resume_cursor // \"\"")"
+    if [[ -z "$batch_resume_cursor" ]]; then
+      batch_resume_cursor="$next_cursor"
+    fi
 
     comments_json="$(prtend_forge_review_comments "$pr" "$batch_id")" || return $?
     comments_count="$(printf '%s' "$comments_json" | jq '.comments | length')"
@@ -238,6 +256,10 @@ _reviews_poll_emit_pending() {
         | jq -c --argjson c "$comment_obj" '. + [$c]')"
     done
 
+    # Per-event `next_cursor` is *this* batch's resume token. A consumer
+    # that picks one event and drops the rest can still resume correctly:
+    # passing the chosen event's next_cursor on the next call yields the
+    # batches strictly after it.
     jq -cn \
       --argjson pr "$pr" \
       --arg batch_id "$batch_id" \
@@ -245,17 +267,21 @@ _reviews_poll_emit_pending() {
       --arg author "$author" \
       --arg review_state "$review_state" \
       --argjson comments "$event_comments_json" \
-      --arg next_cursor "$next_cursor" \
+      --arg next_cursor "$batch_resume_cursor" \
       '{type:"review_batch", pr:$pr, batch_id:$batch_id,
         submitted_at:$submitted_at, author:$author,
         review_state:$review_state, comments:$comments,
         next_cursor:$next_cursor}'
 
+    last_resume_cursor="$batch_resume_cursor"
     _PRTEND_REVIEWS_POLL_EMITTED=$(( _PRTEND_REVIEWS_POLL_EMITTED + 1 ))
   done
 
   if (( write_cursor == 1 )); then
-    prtend_state_set_cursor "$pr" "$next_cursor" >/dev/null || return 1
+    # Advance state past exactly the batches we emitted. When max_batches
+    # truncated the response, this leaves the unemitted ones for the next
+    # call.
+    prtend_state_set_cursor "$pr" "$last_resume_cursor" >/dev/null || return 1
   fi
   return 0
 }

@@ -507,11 +507,18 @@ _prtend_forge_gh_reviews_since() {
     # Propagate per-review comments errors; spec says don't swallow forge failures.
     comments_json="$(gh api "repos/${slug}/pulls/${pr}/reviews/${review_id}/comments" --paginate | jq -s 'add // []')" || return $?
     comment_ids="$(printf '%s' "$comments_json" | jq '[ .[] | (.id | tostring) ]')"
+    # `resume_cursor` is the per-batch resume token — the cursor value the
+    # *next* call should pass to skip past this batch alone. For GitHub
+    # that's the review id (cursors are review ids). The subcommand uses it
+    # when `--block` emits a single batch out of N pending: it must advance
+    # state past just the emitted batch, not past every batch the call
+    # observed.
     batch="$(jq -nc \
       --arg id "$review_id" --arg sa "$submitted_at" \
       --arg au "$author" --arg st "$state" \
       --argjson cids "$comment_ids" \
-      '{batch_id: $id, submitted_at: $sa, author: $au, state: $st, comment_ids: $cids}')"
+      '{batch_id: $id, submitted_at: $sa, author: $au, state: $st,
+        comment_ids: $cids, resume_cursor: $id}')"
     batches="$(printf '%s' "$batches" | jq -c --argjson b "$batch" '. + [$b]')"
     if (( review_id > max_id )); then max_id="$review_id"; fi
   done
@@ -576,7 +583,12 @@ _prtend_forge_gl_reviews_since() {
         }
     ] | sort_by(._max_t)')"
 
-  batches="$(printf '%s' "$filtered" | jq -c '[ .[] | del(._max_t) ]')"
+  # `resume_cursor` is the per-batch resume token — the ISO-formatted max
+  # settled-note timestamp for the batch. Used by the subcommand's `--block`
+  # path to advance state past just the one batch it emits (the across-call
+  # `next_cursor` is the max of all per-batch resume_cursors).
+  batches="$(printf '%s' "$filtered" | jq -c '
+    [ .[] | . + { resume_cursor: (._max_t | strftime("%Y-%m-%dT%H:%M:%SZ")) } | del(._max_t) ]')"
   next_cursor="$(printf '%s' "$filtered" | jq -r --arg fb "$cursor" '
     if length == 0 then $fb
     else ([ .[]._max_t ] | max) | strftime("%Y-%m-%dT%H:%M:%SZ") end')"

@@ -150,7 +150,10 @@ case_once_two_batches() {
     assert_eq "event count" 2 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
     assert_eq "first batch_id"  '"100"' "$(printf '%s\n' "$out" | sed -n 1p | jq -c .batch_id)"
     assert_eq "second batch_id" '"200"' "$(printf '%s\n' "$out" | sed -n 2p | jq -c .batch_id)"
-    assert_eq "first next_cursor"  '"200"' "$(printf '%s\n' "$out" | sed -n 1p | jq -c .next_cursor)"
+    # Per-event next_cursor is each batch's own resume_cursor, not the
+    # across-call max — a consumer that drops the second event can still
+    # resume from the first event's next_cursor and pick up batch 200 next.
+    assert_eq "first next_cursor"  '"100"' "$(printf '%s\n' "$out" | sed -n 1p | jq -c .next_cursor)"
     assert_eq "second next_cursor" '"200"' "$(printf '%s\n' "$out" | sed -n 2p | jq -c .next_cursor)"
     assert_eq "cursor written" '200' "$(prtend_state_get_cursor 7)"
   )
@@ -413,6 +416,38 @@ case_block_timeout_no_late_emit() {
   )
 }
 
+# ----------------------------------------------------------------------------
+# Case 15 — --block with multiple pending batches must emit exactly ONE
+# event per cli-contract.md § "Output discipline" (streamed commands), and
+# the state cursor must advance only past that one batch, leaving the
+# remaining batches for the next call.
+# ----------------------------------------------------------------------------
+case_block_emits_one_of_many() {
+  echo "case: --block emits one of many pending"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
+    _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.two_batches.json"; }
+    _prtend_forge_gh_review_comments() {
+      local batch_id="$2"
+      if [[ "$batch_id" == "100" ]]; then cat "$FIXTURES/review_comments.batch_a.json"
+      else cat "$FIXTURES/review_comments.batch_b.json"; fi
+    }
+    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
+    out="$(prtend_cmd_reviews_poll --pr 7 --block 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 0 "$rc"
+    assert_eq "event count" 1 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+    assert_eq "emitted first batch" '"100"' "$(jq -c .batch_id <<<"$out")"
+    assert_eq "event next_cursor"   '"100"' "$(jq -c .next_cursor <<<"$out")"
+    # Cursor advanced past batch 100 only — batch 200 is left for next call.
+    assert_eq "state cursor"        '100'   "$(prtend_state_get_cursor 7)"
+  )
+}
+
+case_block_emits_one_of_many
 case_once_empty
 case_once_one_batch
 case_once_two_batches
