@@ -1,0 +1,8 @@
+# Sample config
+system_reviewers:
+  - copilot
+optional_reviewers:
+  - alice
+watch_strategy: blocking
+poll_interval_seconds: 15
+ci_retry_limit: 3

@@ -1,0 +1,4 @@
+system_reviewers:
+  - copilot
+&^% this line is garbage
+watch_strategy: blocking
