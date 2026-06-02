@@ -1,6 +1,6 @@
 # prtend
 
-Tend your PR while you pretend you're not procrastinating. Subscribes to CI and review events after a push, fixes what can be fixed, resolves review comments deterministically.
+Tend your PR while you pretend you're actually still there. Subscribes to CI and review events after a push, fixes what can be fixed, resolves review comments deterministically.
 
 **Pre-release notice:** prtend is in early development and not yet usable end-to-end. The repository ships design documents plus an initial CLI dispatcher and core helper library; subcommands are being built step-by-step. See [docs/overview.md](docs/overview.md) for the project overview and [docs/build-steps.md](docs/build-steps.md) for the build plan.
 
