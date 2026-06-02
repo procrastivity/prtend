@@ -168,7 +168,7 @@ prtend_cmd_reviews_poll() {
 _reviews_poll_emit_pending() {
   local pr="$1" cursor="$2" write_cursor="$3"
   local reviews_json batches next_cursor count i
-  local batch_id submitted_at author review_state comment_ids
+  local batch_id submitted_at author review_state
   local comments_json comments_count j
   local comment_id c_author c_body c_path c_line c_created
   local anchor_stale already_handled
@@ -190,7 +190,6 @@ _reviews_poll_emit_pending() {
     submitted_at="$(printf '%s' "$batches" | jq -r ".[$i].submitted_at // \"\"")"
     author="$(printf '%s' "$batches" | jq -r ".[$i].author // \"\"")"
     review_state="$(printf '%s' "$batches" | jq -r ".[$i].state // \"commented\"")"
-    comment_ids="$(printf '%s' "$batches" | jq -c ".[$i].comment_ids // []")"
 
     comments_json="$(prtend_forge_review_comments "$pr" "$batch_id")" || return $?
     comments_count="$(printf '%s' "$comments_json" | jq '.comments | length')"
@@ -206,7 +205,7 @@ _reviews_poll_emit_pending() {
 
       _reviews_poll_anchor_stale "$c_path" "$c_line"
       anchor_stale="$_PRTEND_REVIEWS_POLL_RET"
-      _reviews_poll_already_handled "$pr" "$comment_id" "$comment_ids"
+      _reviews_poll_already_handled "$pr" "$comment_id"
       already_handled="$_PRTEND_REVIEWS_POLL_RET"
 
       if [[ "$c_line" == "null" || -z "$c_line" ]]; then
@@ -289,26 +288,31 @@ _reviews_poll_anchor_stale() {
   fi
 }
 
-# Walks every *other* comment id in this batch and sets RET=true the moment
-# one carries a prtend marker; false otherwise. Body fetches are memoized in
-# `body_cache` (caller's local) so a thread with N comments pays the fetch
-# cost once per reply id, not N×.
+# Fetches the comment's thread (root + replies for GitHub review comments;
+# all notes in the discussion for GitLab) via `prtend_forge_review_thread_bodies`
+# and sets RET=true if any body in that thread carries a prtend marker.
+# The marker lives in the *reply* posted by `note-post`, not in the
+# reviewer's original anchored comment — so walking the batch's sibling
+# `comment_ids` would miss it. Mirrors note-post's idempotency probe.
+# Per-batch cache (`body_cache` in caller, keyed by comment_id) dedupes
+# fetches when two projected comments resolve to the same thread.
 _reviews_poll_already_handled() {
-  local pr="$1" self_id="$2" ids_json="$3"
-  local n k other body
-  n="$(printf '%s' "$ids_json" | jq 'length')"
-  for ((k=0; k<n; k++)); do
-    other="$(printf '%s' "$ids_json" | jq -r ".[$k]")"
-    if [[ "$other" == "$self_id" ]]; then continue; fi
-    if [[ -n "${body_cache[$other]+set}" ]]; then
-      body="${body_cache[$other]}"
-    else
-      body="$(prtend_forge_comment_body "$pr" "$other" 2>/dev/null || true)"
-      body_cache[$other]="$body"
+  local pr="$1" comment_id="$2"
+  local thread_bodies probe_rc
+  if [[ -n "${body_cache[$comment_id]+set}" ]]; then
+    thread_bodies="${body_cache[$comment_id]}"
+  else
+    probe_rc=0
+    thread_bodies="$(prtend_forge_review_thread_bodies "$pr" "$comment_id" 2>/dev/null)" \
+      || probe_rc=$?
+    if (( probe_rc != 0 )); then
+      thread_bodies=""
     fi
-    if prtend_note_is_handled "$body"; then
-      _PRTEND_REVIEWS_POLL_RET=true; return 0
-    fi
-  done
-  _PRTEND_REVIEWS_POLL_RET=false
+    body_cache[$comment_id]="$thread_bodies"
+  fi
+  if prtend_note_is_handled "$thread_bodies"; then
+    _PRTEND_REVIEWS_POLL_RET=true
+  else
+    _PRTEND_REVIEWS_POLL_RET=false
+  fi
 }

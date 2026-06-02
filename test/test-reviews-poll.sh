@@ -102,10 +102,12 @@ case_once_one_batch() {
     _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
     _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.one_batch.json"; }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
-    _prtend_forge_gh_comment_body() {
+    # 1002's thread has a marker-bearing reply (posted by a prior note-post);
+    # 1001's thread is unhandled.
+    _prtend_forge_gh_review_thread_bodies() {
       local id="$2"
-      if [[ "$id" == "1003" ]]; then cat "$FIXTURES/comment_body.handled.txt"
-      else cat "$FIXTURES/comment_body.unhandled.txt"; fi
+      if [[ "$id" == "1002" ]]; then cat "$FIXTURES/thread_bodies.handled.txt"
+      else cat "$FIXTURES/thread_bodies.unhandled.txt"; fi
     }
     prtend_state_set_cursor 7 "5" >/dev/null
     out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
@@ -140,7 +142,7 @@ case_once_two_batches() {
       if [[ "$batch_id" == "100" ]]; then cat "$FIXTURES/review_comments.batch_a.json"
       else cat "$FIXTURES/review_comments.batch_b.json"; fi
     }
-    _prtend_forge_gh_comment_body() { cat "$FIXTURES/comment_body.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
@@ -166,7 +168,7 @@ case_once_explicit_cursor() {
     _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
     _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.one_batch.json"; }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
-    _prtend_forge_gh_comment_body() { cat "$FIXTURES/comment_body.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --once --cursor abc 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
@@ -192,7 +194,7 @@ case_block_then_batch() {
       else cat "$FIXTURES/reviews_since.one_batch.json"; fi
     }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.batch_a.json"; }
-    _prtend_forge_gh_comment_body() { cat "$FIXTURES/comment_body.unhandled.txt"; }
+    _prtend_forge_gh_review_thread_bodies() { cat "$FIXTURES/thread_bodies.unhandled.txt"; }
     out="$(prtend_cmd_reviews_poll --pr 7 --block 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
@@ -318,11 +320,13 @@ case_anchor_stale_combinations() {
 }
 
 # ----------------------------------------------------------------------------
-# Case 12 — already_handled cache: 3 comments share one marker reply id ⇒
-# comment_body fetched exactly once per *other* id (not once per comment).
+# Case 12 — already_handled walks the *thread* (not the batch's sibling
+# comment_ids) AND caches by comment_id. The marker lives on a reply that
+# does NOT appear in `comment_ids` — a sibling walk would miss it. We also
+# assert each projected comment id is fetched at most once.
 # ----------------------------------------------------------------------------
-case_already_handled_cache() {
-  echo "case: already_handled cache"
+case_already_handled_thread_walk() {
+  echo "case: already_handled via thread walk"
   (
     new_sandbox
     cd "$SANDBOX" || exit
@@ -330,21 +334,27 @@ case_already_handled_cache() {
     _prtend_forge_gh_pr_state() { cat "$FIXTURES/pr_state.open.json"; }
     _prtend_forge_gh_reviews_since() { cat "$FIXTURES/reviews_since.cache_batch.json"; }
     _prtend_forge_gh_review_comments() { cat "$FIXTURES/review_comments.cache_batch.json"; }
-    # Count calls per id; "3999" carries the marker.
+    # Both projected comment ids resolve to a thread with a marker-bearing
+    # reply. Count calls per id to verify the per-batch cache.
     fetches="$SANDBOX/fetches"; : > "$fetches"
-    _prtend_forge_gh_comment_body() {
+    _prtend_forge_gh_review_thread_bodies() {
       local id="$2"
       printf '%s\n' "$id" >> "$fetches"
-      if [[ "$id" == "3999" ]]; then cat "$FIXTURES/comment_body.handled.txt"
-      else cat "$FIXTURES/comment_body.unhandled.txt"; fi
+      cat "$FIXTURES/thread_bodies.handled.txt"
     }
     out="$(prtend_cmd_reviews_poll --pr 7 --once 2>/dev/null)"
     rc=$?
     assert_eq "exit code" 0 "$rc"
-    assert_eq "all three handled" 'true' \
+    assert_eq "all projected handled" 'true' \
       "$(jq -c '[.comments[].already_handled] | all' <<<"$out")"
-    # Cache: 3999 is fetched exactly once across all three comments.
-    assert_eq "3999 fetched once" 1 "$(grep -c '^3999$' "$fetches")"
+    # Each projected id fetched exactly once (no repeat lookups).
+    assert_eq "3001 fetched once" 1 "$(grep -c '^3001$' "$fetches")"
+    assert_eq "3002 fetched once" 1 "$(grep -c '^3002$' "$fetches")"
+    assert_eq "3003 fetched once" 1 "$(grep -c '^3003$' "$fetches")"
+    # 3999 is the reply id (lives inside the thread body); we never query it
+    # directly, which is the whole point of using thread_bodies over a
+    # sibling walk.
+    assert_eq "3999 never queried directly" 0 "$(grep -c '^3999$' "$fetches")"
   )
 }
 
@@ -359,7 +369,7 @@ case_pr_closed_mid_loop
 case_bad_pr
 case_mutex
 case_anchor_stale_combinations
-case_already_handled_cache
+case_already_handled_thread_walk
 
 PASS="$(grep -c '^P' "$RESULTS" || true)"
 FAIL="$(grep -c '^F' "$RESULTS" || true)"

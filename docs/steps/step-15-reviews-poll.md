@@ -14,7 +14,7 @@ See `../cli-contract.md` § "`prtend reviews-poll`" for the output contract and 
 
 - Step 02 (`dispatcher`) complete — `bin/prtend` already routes `reviews-poll` to `lib/prtend/prtend-subcommands/reviews_poll.bash` and calls `prtend_cmd_reviews_poll`; `prtend_log_*`, `prtend_atomic_write`, `prtend_repo_slug`, `prtend_json_get`, and the `--verbose` plumbing are available.
 - Step 03 (`forge-detect`) complete — `prtend_forge_cli_ready` is the readiness gate.
-- Step 04 (`forge-read`) complete — `prtend_forge_reviews_since`, `prtend_forge_review_comments`, `prtend_forge_comment_body`, and `prtend_forge_pr_state` are the four forge ops this subcommand uses, in that order per batch.
+- Step 04 (`forge-read`) complete — `prtend_forge_reviews_since`, `prtend_forge_review_comments`, `prtend_forge_review_thread_bodies`, and `prtend_forge_pr_state` are the four forge ops this subcommand uses, in that order per batch.
 - Step 05 (`state`) complete — `prtend_state_set_cursor` / `prtend_state_get_cursor` are already wired to `.last_review_cursor` in the per-PR state file. No state-lib additions are needed.
 - Step 06 (`notes`) complete — `prtend_note_is_handled` is the marker grep used to fill `already_handled`.
 - Step 14 (`ci-watch`) complete — establishes the watch-primitive flag conventions (`--block` / `--once` / `--timeout S`) and the PR-closed-mid-watch contract (exit 4 with documented stderr, no stdout). reviews-poll follows the same shape so the multiplexer in step 16 can treat them symmetrically.
@@ -33,7 +33,7 @@ After this step:
 - `bin/prtend reviews-poll --pr N --once --cursor CURSOR` reads from the supplied cursor instead of state, runs once, and does **not** write the cursor back. `--cursor` is honored on `--block` too (same read-only-cursor semantics — the caller manages cursor in that case as well).
 - Each emitted event matches `../cli-contract.md` § "`prtend reviews-poll`" → "Output": `{type:"review_batch", pr, batch_id, submitted_at, author, review_state, comments[], next_cursor}`. `comments[]` carries fully-projected comment objects (`comment_id`, `author`, `body`, `path`, `line`, `anchor_stale`, `already_handled`, `created_at`).
 - `anchor_stale` is true when the comment's `(path, line)` no longer exists at the current HEAD; false otherwise. Computed locally by diffing, never trusted from the forge.
-- `already_handled` is true when the comment thread already contains a prtend marker on any reply. Computed by calling `prtend_forge_comment_body` against each reply id surfaced by the review (GitHub) or the discussion (GitLab) and running the body through `prtend_note_is_handled`.
+- `already_handled` is true when the comment thread already contains a prtend marker. Computed by calling `prtend_forge_review_thread_bodies "$pr" "$comment_id"` (the same idempotency primitive `note-post` uses; see `lib/prtend/prtend-subcommands/note_post.bash:122`) and running the concatenated thread bodies through `prtend_note_is_handled`. The marker lives in the *reply* `note-post` writes — sibling walks of the batch's `comment_ids` would miss replies posted to the same thread but outside the current review (the common case on GitHub).
 - `next_cursor` is the cursor the *next* call should resume from — for GitHub the largest review id observed across the emitted batches; for GitLab the latest settled-note ISO timestamp. The same value is written to state when `--cursor` was not passed.
 - PR-closed-mid-poll is observable. If the PR transitions to `closed`/`merged` while the loop is waiting for the first batch, `reviews-poll` exits 4 with stderr `prtend: PR <n> closed during poll` and no stdout. Symmetric to ci-watch's PR-closed contract.
 - No new forge entry points, no new state-lib functions, no changes to the notes lib. The only new file is the subcommand.
@@ -93,7 +93,7 @@ Composition (in order):
      - Call `prtend_forge_review_comments "$pr" "$batch_id"` → `{comments: [...]}`. Note: for GitHub the second argument is the review id (== `batch_id`); for GitLab it is the discussion id (also `batch_id`). The dispatch is identical from the subcommand's perspective.
      - For each comment in `comments[]`:
        - Compute `anchor_stale` locally (see "Anchor staleness" below). Overwrite the `anchor_stale: false` field returned by the forge lib.
-       - Compute `already_handled` by calling `prtend_forge_comment_body "$pr" "$other_comment_id"` against every *other* note id in this same batch's `comment_ids[]` (i.e. the replies posted by anyone, including prtend) and running each body through `prtend_note_is_handled`. Exit on first match. (Both forge privates take `<pr> <comment-id>` — see `lib/prtend/prtend-forge-lib.bash:643` for the gh shape and `:653` for the gl shape; gh ignores the `pr` argument, gl requires it.) The check is per-comment but the body fetches can be cached across comments in the same batch (a small associative array keyed by comment id is enough — replies on a thread are shared).
+       - Compute `already_handled` by calling `prtend_forge_review_thread_bodies "$pr" "$comment_id"` (see `lib/prtend/prtend-forge-lib.bash:737`) and running the result through `prtend_note_is_handled`. The primitive returns the concatenated bodies of every comment in the thread containing `comment_id` — original anchored note + every reply on GitHub, all notes in the discussion on GitLab — which is exactly what `note-post`'s own idempotency probe uses. Treat exit 1 (id unknown — shouldn't happen, since we just received the id from `review_comments`) as "not handled" and move on. Cache the result in a per-batch associative array keyed by `comment_id` (only useful when two projected comments resolve to the same thread, but cheap to keep).
        - Replace `already_handled: …` in the comment object with the computed boolean.
      - Project the per-batch event:
        - `type`: `"review_batch"`
@@ -131,8 +131,8 @@ Every forge primitive this subcommand needs is already public (`prtend_forge_rev
 - **`--cursor CURSOR` is read-only.** When the caller passes a cursor explicitly, prtend reads from it but does not write back. This matches `../cli-contract.md` § "`prtend reviews-poll`" → "Flags". The semantics are "the caller is managing cursor on its own"; silently overwriting state would surprise that caller on the next implicit-cursor call.
 - **`next_cursor` is the same value in every event of a single call.** The forge lib computes one `next_cursor` per `reviews_since` invocation; we emit it on every batch in that response so a consumer that processes one event at a time can drop the rest and still resume correctly from any single observed event. Don't try to compute per-batch cursors — that's not what the forge lib returns and the contract treats it as a single resume token.
 - **Per-batch second call to `review_comments` is unavoidable on GitHub.** The reviews endpoint returns batch metadata; comments require a follow-up call per review id. On GitLab the discussion endpoint already returns notes, but the canonical `_prtend_forge_gl_review_comments` still re-fetches the discussion by id for shape symmetry. Don't try to optimize by reading the GitLab discussions response twice in the subcommand — the forge lib is the right place to dedupe that, and it's already a separate step's concern.
-- **`already_handled` walks the batch's `comment_ids`, not the whole PR's comment graph.** A reply posted *outside* the batch (by prtend itself in a previous run) is the case that matters; that reply lives in the same review (GitHub) or the same discussion (GitLab), which is why the `comment_ids[]` list of the *current* batch contains it. We do not paginate the PR's full comment list.
-- **`already_handled` against the comment's *own* body is not skipped explicitly.** Running `prtend_note_is_handled` on a request-for-change comment's own body will almost always be false; even if a human echoes the marker text into their comment, treating it as "already handled" is the conservative choice (we won't double-post). The decision rubric handles the surprise case; the CLI just reports.
+- **`already_handled` uses `prtend_forge_review_thread_bodies`, not a sibling walk of the batch's `comment_ids`.** `note-post` writes the marker to a *reply* keyed by the original comment id — on GitHub that reply is part of the PR-level review-comments stream and does NOT appear in the source review's `comment_ids` (and won't on subsequent reviews either). The thread-bodies primitive is the same one `note_post.bash:122` uses for its own double-post guard; reusing it keeps the "what counts as handled" rule in exactly one place. A sibling walk would miss the common case (prior run replied via `note-post`, current run re-polls the same review) and let the watch loop double-post.
+- **The thread-bodies fetch includes the reviewer's own comment body.** `prtend_forge_review_thread_bodies` concatenates root + replies, so a human who quotes the marker into the original comment will register as handled. That's the conservative call — we won't double-post — and it matches `note-post`'s own behavior. The decision rubric handles the surprise case; the CLI just reports.
 - **Anchor staleness uses the cheapest possible check.** No `git diff` walk, no line-by-line content compare. The skill's downstream rubric is what decides whether stale means "skip" or "escalate" — the CLI's job is to mark the bit.
 - **`--block` re-checks PR state on every poll cycle, not just on entry.** The pre-flight check in step 2 catches "PR already closed"; the loop's per-cycle check catches "PR closed while we were waiting." Without it the loop would block forever against a merged PR.
 - **`PRTEND_POLL_INTERVAL` is the only tunable.** No `--interval` flag. Same rationale as ci-watch (step 14): per-subcommand flag divergence complicates the watch multiplexer.
@@ -150,16 +150,16 @@ Fixtures under `test/fixtures/reviews_poll/`:
 - `reviews_since.empty.json` — `{batches:[], next_cursor:"0"}`.
 - `reviews_since.one_batch.json` — one batch with two `comment_ids`.
 - `reviews_since.two_batches.json` — two batches; the second's `submitted_at` is later (so order assertions are meaningful).
-- `review_comments.batch_a.json` — `{comments:[...]}` matching the first batch's `comment_ids`, with one comment anchored to `src/widget.ts:10` and one to `src/widget.ts:9999` (forces stale-path-line-count branch).
+- `review_comments.batch_a.json` — `{comments:[...]}` matching the first batch, with one comment anchored to `src/widget.ts:10` and one to `src/widget.ts:9999` (forces stale-path-line-count branch).
 - `review_comments.batch_b.json` — second batch's comments.
-- `comment_body.handled.txt` — body containing `<!-- prtend: handled v1 -->`.
-- `comment_body.unhandled.txt` — body without the marker.
+- `thread_bodies.handled.txt` — concatenated thread (root + replies) containing `<!-- prtend: handled v1 -->`.
+- `thread_bodies.unhandled.txt` — concatenated thread without the marker.
 - `pr_state.open.json`, `pr_state.closed.json`, `pr_state.merged.json` — for the preflight and mid-loop paths.
 
 Test cases (one assertion block each):
 
 1. `--once` with no prior cursor, forge returns `reviews_since.empty.json` → no output, cursor not written, exit 0.
-2. `--once` with prior cursor `"5"`, forge returns `reviews_since.one_batch.json` (one batch, two comments, one stale anchor, one with a marker-bearing reply) → emits one event with `comments[0].anchor_stale=true`, `comments[1].already_handled=true`, cursor written to the `next_cursor` from the response.
+2. `--once` with prior cursor `"5"`, forge returns `reviews_since.one_batch.json` (one batch, two comments; one anchor is stale; the second comment's thread contains a marker-bearing reply, surfaced via the mocked `review_thread_bodies`) → emits one event with `comments[0].anchor_stale=true`, `comments[1].already_handled=true`, cursor written to the `next_cursor` from the response.
 3. `--once` with prior cursor and `reviews_since.two_batches.json` → emits two events on stdout, both carry the same `next_cursor`, cursor written once.
 4. `--once --cursor abc` with `reviews_since.one_batch.json` → emits one event, cursor NOT written to state.
 5. `--block` with empty first poll, then one batch on the second poll → emits one event, exits 0. (`PRTEND_POLL_INTERVAL=0`.)
@@ -169,7 +169,7 @@ Test cases (one assertion block each):
 9. `--pr foo` (non-numeric) → exit 2.
 10. `--once --block` → exit 2 with the mutual-exclusion error.
 11. Anchor-staleness unit-ish test: build a sandbox repo with `src/widget.ts` (20 lines), then directly call the subcommand's anchor-check helper (or invoke the subcommand end-to-end with a fixture that names `src/widget.ts:10` and `src/widget.ts:9999` and `does/not/exist.ts:1`) and assert the three booleans.
-12. `already_handled` cache test: a batch with three comments on the same thread (so the reply id appears in all three `comment_ids`) records only one `comment_body` fetch via the mock's call counter — proves the per-batch cache works.
+12. `already_handled` thread-walk + cache test: a batch with two projected comments whose marker lives in a thread reply (NOT in either projected comment, NOT in the batch's `comment_ids`) → both `comments[*].already_handled=true`. Mock `review_thread_bodies` with a per-comment-id call counter and assert each id is fetched at most once (verifying the per-batch cache; proves we never fall back to a sibling walk).
 
 ## Verification
 
