@@ -1,0 +1,1 @@
+{"comments":[{"comment_id":"1001","author":"alice","body":"this line is gone","path":"src/widget.ts","line":9999,"anchor_stale":false,"created_at":"2026-01-01T00:00:00Z"},{"comment_id":"1002","author":"alice","body":"nit","path":"src/widget.ts","line":10,"anchor_stale":false,"created_at":"2026-01-01T00:00:01Z"}]}
