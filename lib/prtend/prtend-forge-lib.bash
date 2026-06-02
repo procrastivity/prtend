@@ -250,7 +250,14 @@ _prtend_forge_gh_cli_authed_login() {
     printf '%s\n' "$out" | head -n 1 >&2
     return 1
   fi
-  printf '%s\n' "$out" | grep -Eo 'as [^ ]+' | head -n 1 | awk '{print $2}'
+  # `gh auth status` reports the logged-in user as either "as <user>" (older
+  # versions / single-account auth) or "account <user>" (newer / multi-account
+  # docs). Match both. The grep is allowed to find nothing — auth succeeded
+  # is what we care about; an unparseable login just yields empty stdout.
+  local login
+  login="$(printf '%s\n' "$out" | grep -Eo '(as|account) [^ ]+' | head -n 1 | awk '{print $2}')" || login=""
+  printf '%s\n' "$login"
+  return 0
 }
 
 _prtend_forge_gl_cli_authed_login() {
@@ -261,7 +268,10 @@ _prtend_forge_gl_cli_authed_login() {
     printf '%s\n' "$out" | head -n 1 >&2
     return 1
   fi
-  printf '%s\n' "$out" | grep -Eo 'as [^ ]+' | head -n 1 | awk '{print $2}'
+  local login
+  login="$(printf '%s\n' "$out" | grep -Eo '(as|account) [^ ]+' | head -n 1 | awk '{print $2}')" || login=""
+  printf '%s\n' "$login"
+  return 0
 }
 
 # -- branch ----------------------------------------------------------------

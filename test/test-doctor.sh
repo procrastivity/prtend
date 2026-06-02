@@ -55,10 +55,12 @@ new_sandbox() {
 }
 
 # install a fake `gh` whose behavior is parameterized by env vars set per-test.
+# auth_format: "as" (default, older gh) or "account" (newer multi-account gh).
 install_fake_gh() {
   local version="${1:-2.62.0}"
   local authed="${2:-1}"
   local login="${3:-procrastivity}"
+  local auth_format="${4:-as}"
   cat >"$SANDBOX/bin/gh" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
@@ -68,7 +70,7 @@ case "\$1" in
     ;;
   auth)
     if [[ "$authed" == "1" ]]; then
-      printf 'github.com\n  ✓ Logged in to github.com as $login\n' >&2
+      printf 'github.com\n  ✓ Logged in to github.com $auth_format $login\n' >&2
       exit 0
     else
       printf 'You are not logged into any GitHub hosts.\n' >&2
@@ -267,13 +269,14 @@ case_state_dir_unwritable() {
     cd "$SANDBOX" || exit
     install_fake_gh 2.62.0 1 alice
     load_libs
-    # Pre-create the resolved state dir read-only.
-    state_dir="$(prtend_state_dir)"
-    mkdir -p "$state_dir"
-    chmod 0500 "$state_dir"
+    # Override prtend_state_dir to point at a path whose parent is a regular
+    # file, not a directory — mkdir -p cannot create children there regardless
+    # of UID (root included). UID-independent failure trigger so the test
+    # passes in CI containers running as root.
+    : >"$SANDBOX/blocker"
+    prtend_state_dir() { printf '%s/blocker/state-dir\n' "$SANDBOX"; }
     out="$(prtend_cmd_doctor --check state_dir_writable 2>/dev/null)"
     rc=$?
-    chmod 0700 "$state_dir"
     assert_eq "exit code" 1 "$rc"
     assert_eq "status" '"fail"' "$(jq -c '.checks[0].status' <<<"$out")"
   )
@@ -520,6 +523,21 @@ case_marker_mismatch() {
 # ----------------------------------------------------------------------------
 # Case 17 — Config with an orphaned `- item` under a scalar key is rejected.
 # ----------------------------------------------------------------------------
+case_forge_authed_account_format() {
+  echo "case: forge authed account format"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    install_fake_gh 2.62.0 1 alice account
+    load_libs
+    out="$(prtend_cmd_doctor --check forge_cli_authed 2>/dev/null)"
+    rc=$?
+    assert_eq "exit code" 0 "$rc"
+    assert_eq "status" '"pass"' "$(jq -c '.checks[0].status' <<<"$out")"
+    assert_contains "message" "Authenticated as alice" "$(jq -r '.checks[0].message' <<<"$out")"
+  )
+}
+
 case_config_orphan_list_item() {
   echo "case: config orphan list item"
   (
@@ -554,6 +572,7 @@ case_check_unknown
 case_marker_v1
 case_marker_mismatch
 case_config_orphan_list_item
+case_forge_authed_account_format
 
 PASS="$(grep -c '^P' "$RESULTS" || true)"
 FAIL="$(grep -c '^F' "$RESULTS" || true)"
