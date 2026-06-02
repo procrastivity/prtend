@@ -266,7 +266,12 @@ prtend reviews-poll --pr N [--block | --once | --timeout S] [--cursor CURSOR]
 | `--block` / `--once` / `--timeout S` | same as `ci-watch` | same behavior |
 | `--cursor CURSOR` | (read from state file) | Override cursor; results returned are batches *after* this cursor |
 
-The cursor is forge-specific (GitHub: last review ID; GitLab: last settled discussion timestamp). When `--cursor` is omitted, prtend reads from `<state-dir>/<pr>.json`. After emitting an event, prtend writes the new cursor back to state. With `--cursor` provided explicitly, state is read but not written — the caller manages cursor.
+The cursor is forge-specific and treated as an opaque token by callers — round-trip the value prtend emits as `next_cursor` without parsing it. For reference:
+
+- **GitHub:** compound `"<submitted_at>|<review_id>"` (e.g. `"2026-05-31T19:48:13Z|4789012"`). An id alone is *not* sufficient because GitHub assigns review ids at draft creation, not submission, so a low-id draft submitted late would be lost by an id-only filter. A bare numeric cursor (the format the prior version of these docs described) is still accepted for backward compatibility and re-encoded to the compound form on the next emission.
+- **GitLab:** ISO-8601 timestamp of the last seen settled discussion's max note time, with `.NNN` fractional precision preserved. A timestamp without fractional (the form the prior docs described) is normalized to `.000Z` on input.
+
+When `--cursor` is omitted, prtend reads from `<state-dir>/<pr>.json`. After emitting an event, prtend writes the new cursor back to state. With `--cursor` provided explicitly, state is read but not written — the caller manages cursor.
 
 ### Output
 

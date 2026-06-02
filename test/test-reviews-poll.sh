@@ -538,6 +538,45 @@ JSON
 }
 
 # ----------------------------------------------------------------------------
+# Case 16c — Backward-compat: a bare numeric GitHub cursor (the previously
+# documented form, or any pre-existing state file written before the
+# compound-cursor change) must be interpreted as a legacy id-only filter,
+# NOT silently downgraded to "from the beginning" (which would re-emit
+# every old review). The next emission upgrades the cursor to compound.
+# ----------------------------------------------------------------------------
+case_gh_reviews_since_legacy_numeric_cursor() {
+  echo "case: gh legacy numeric cursor is honored"
+  (
+    new_sandbox
+    cd "$SANDBOX" || exit
+    load_libs
+    _prtend_forge_gh_repo_slug() { echo "o/r"; }
+    gh() {
+      case "$*" in
+        *"/reviews/"*"/comments"*) echo '[]' ;;
+        *"/reviews"*)
+          cat <<'JSON'
+[
+  {"id":100,"submitted_at":"2025-12-31T00:00:00Z","user":{"login":"alice"},"state":"COMMENTED"},
+  {"id":200,"submitted_at":"2026-01-01T00:00:00Z","user":{"login":"bob"},"state":"APPROVED"},
+  {"id":300,"submitted_at":"2026-01-02T00:00:00Z","user":{"login":"carol"},"state":"COMMENTED"}
+]
+JSON
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    # Legacy cursor "200" means "id > 200" — only id=300 should emit.
+    out="$(_prtend_forge_gh_reviews_since 7 "200")"
+    assert_eq "legacy filter count" 1 "$(jq -c '.batches | length' <<<"$out")"
+    assert_eq "legacy filter batch_id" '"300"' "$(jq -c '.batches[0].batch_id' <<<"$out")"
+    # And the emission upgrades the cursor to the compound form.
+    assert_eq "next_cursor upgraded" '"2026-01-02T00:00:00Z|300"' \
+      "$(jq -c .next_cursor <<<"$out")"
+  )
+}
+
+# ----------------------------------------------------------------------------
 # Case 17 — GitLab forge: cursor must keep fractional-second precision so
 # `--block` emitting one of two same-second discussions leaves the other
 # pending for the next call (instead of filtering it out via `> $cur`).
@@ -578,6 +617,7 @@ JSON
 
 case_gh_reviews_since_id_order
 case_gh_reviews_since_late_draft
+case_gh_reviews_since_legacy_numeric_cursor
 case_gl_reviews_since_fractional_cursor
 case_block_emits_one_of_many
 case_once_empty

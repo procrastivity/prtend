@@ -479,7 +479,7 @@ prtend_forge_reviews_since() {
 _prtend_forge_gh_reviews_since() {
   local pr="${1:-}" cursor="${2:-}" slug reviews_json filtered count i
   local review_id submitted_at author state comments_json comment_ids batch
-  local batches batch_resume_cursor next_cursor cur_ts cur_id
+  local batches batch_resume_cursor next_cursor cur_ts cur_id legacy
   if [[ -z "$pr" ]]; then
     prtend_log_error "reviews_since: missing pr argument"; return 2
   fi
@@ -491,14 +491,26 @@ _prtend_forge_gh_reviews_since() {
   # not at submission, so a draft with id=100 created before id=200 may
   # show up in the API only later, with `.id > 200_cursor` filtering it
   # out forever. The pair `(submitted_at, id)` is monotonic in submission
-  # order (id is the tie-breaker for same-instant submissions), which is
-  # the order downstream consumers care about anyway.
-  if [[ -n "$cursor" && "$cursor" == *"|"* ]]; then
+  # order (id is the tie-breaker for same-instant submissions).
+  #
+  # Backward compatibility: an earlier version (and the original docs)
+  # documented the cursor as just the last seen review id. A bare numeric
+  # cursor coming from an existing state file or an explicit `--cursor 200`
+  # call is interpreted under the legacy id-only semantic (`.id > $cur_id`)
+  # so it doesn't silently re-emit every review; the next emission writes
+  # the new compound form, self-healing the state file.
+  legacy=0
+  if [[ -z "$cursor" ]]; then
+    cur_ts=""; cur_id=0
+  elif [[ "$cursor" == *"|"* ]]; then
     cur_ts="${cursor%|*}"
     cur_id="${cursor##*|}"
+  elif [[ "$cursor" =~ ^[0-9]+$ ]]; then
+    cur_ts=""; cur_id="$cursor"; legacy=1
   else
-    cur_ts=""
-    cur_id=0
+    # Malformed: treat as "from the beginning" rather than fail closed —
+    # the forge contract doesn't validate cursor strings.
+    cur_ts=""; cur_id=0
   fi
 
   # `gh api --paginate` on a JSON-array endpoint usually merges pages, but
@@ -507,12 +519,14 @@ _prtend_forge_gh_reviews_since() {
   reviews_json="$(gh api "repos/${slug}/pulls/${pr}/reviews" --paginate | jq -s 'add // []')" || return $?
 
   filtered="$(printf '%s' "$reviews_json" | jq -c \
-    --arg cur_ts "$cur_ts" --argjson cur_id "$cur_id" '
+    --arg cur_ts "$cur_ts" --argjson cur_id "$cur_id" --argjson legacy "$legacy" '
     [ .[]
       | select(.submitted_at != null)
       | select(
-          (.submitted_at > $cur_ts)
-          or (.submitted_at == $cur_ts and .id > $cur_id)
+          if $legacy == 1 then .id > $cur_id
+          else (.submitted_at > $cur_ts)
+               or (.submitted_at == $cur_ts and .id > $cur_id)
+          end
         )
     ] | sort_by(.submitted_at, .id)')"
   count="$(printf '%s' "$filtered" | jq 'length')"
