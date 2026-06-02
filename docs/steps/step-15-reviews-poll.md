@@ -76,11 +76,14 @@ Composition (in order):
 4. **Branch on mode:**
 
    - **`--once`:** call `_reviews_poll_emit_pending "$pr" "$cursor" "$write_cursor"` exactly once. The helper does the `reviews_since` → `review_comments` → projection → emit dance described below. Whatever it returns (0 batches or N batches), exit 0 unless the call surfaced exit 4 (PR closed → propagate).
-   - **`--block` (with or without `--timeout`):** wrap the loop in `timeout --preserve-status "$timeout_seconds"` when `--timeout` is present (on timeout — exit 124 — return 0 with no output and no cursor write). Loop body:
+   - **`--block` (with or without `--timeout`):** track elapsed time in-process — do *not* wrap the loop in `timeout(1)`. Capture `start="$SECONDS"` before entering the loop. Loop body:
      1. Call the same helper.
      2. If it emitted ≥1 batch, exit 0. (The helper has already written the cursor when `write_cursor=true`.)
-     3. Else `sleep "${PRTEND_POLL_INTERVAL:-15}"` and re-check PR state via `prtend_forge_pr_state "$pr"`; on `closed`/`merged`, exit 4 with the documented stderr.
-     4. Repeat.
+     3. Else re-check PR state via `prtend_forge_pr_state "$pr"`; on `closed`/`merged`, exit 4 with the documented stderr.
+     4. If `--timeout` is present and `(( SECONDS - start >= timeout_seconds ))`, return 0 with no output and no cursor write (clean timeout).
+     5. `sleep "${PRTEND_POLL_INTERVAL:-15}"` (cap the sleep to the remaining wall-clock budget when `--timeout` is set, so a short timeout actually returns near its bound) and repeat.
+
+     This mirrors `_prtend_forge_ci_watch_block_common` in `lib/prtend/prtend-forge-lib.bash:1140` — same elapsed-time pattern, same 124-style semantics absorbed locally without the `timeout(1)` wrap.
 
 5. **Helper `_reviews_poll_emit_pending <pr> <cursor> <write_cursor>`** (private to this file, prefix `_reviews_poll_`):
    - Call `prtend_forge_reviews_since "$pr" "$cursor"` and capture the `{batches, next_cursor}` JSON. Propagate any non-zero forge exit code.
@@ -90,7 +93,7 @@ Composition (in order):
      - Call `prtend_forge_review_comments "$pr" "$batch_id"` → `{comments: [...]}`. Note: for GitHub the second argument is the review id (== `batch_id`); for GitLab it is the discussion id (also `batch_id`). The dispatch is identical from the subcommand's perspective.
      - For each comment in `comments[]`:
        - Compute `anchor_stale` locally (see "Anchor staleness" below). Overwrite the `anchor_stale: false` field returned by the forge lib.
-       - Compute `already_handled` by calling `prtend_forge_comment_body "$comment_id"` against every *other* note id in this same batch's `comment_ids[]` (i.e. the replies posted by anyone, including prtend) and running each body through `prtend_note_is_handled`. Exit on first match. The check is per-comment but the body fetches can be cached across comments in the same batch (a small associative array keyed by comment id is enough — replies on a thread are shared).
+       - Compute `already_handled` by calling `prtend_forge_comment_body "$pr" "$other_comment_id"` against every *other* note id in this same batch's `comment_ids[]` (i.e. the replies posted by anyone, including prtend) and running each body through `prtend_note_is_handled`. Exit on first match. (Both forge privates take `<pr> <comment-id>` — see `lib/prtend/prtend-forge-lib.bash:643` for the gh shape and `:653` for the gl shape; gh ignores the `pr` argument, gl requires it.) The check is per-comment but the body fetches can be cached across comments in the same batch (a small associative array keyed by comment id is enough — replies on a thread are shared).
        - Replace `already_handled: …` in the comment object with the computed boolean.
      - Project the per-batch event:
        - `type`: `"review_batch"`
@@ -135,7 +138,7 @@ Every forge primitive this subcommand needs is already public (`prtend_forge_rev
 - **`PRTEND_POLL_INTERVAL` is the only tunable.** No `--interval` flag. Same rationale as ci-watch (step 14): per-subcommand flag divergence complicates the watch multiplexer.
 - **`PRTEND_QUIET_WINDOW` applies on GitLab only.** It's already honored inside `_prtend_forge_gl_reviews_since`; the subcommand does not need to know about it. A test that wants to bypass the window sets `PRTEND_QUIET_WINDOW=0` before calling.
 - **No `--cursor` validation.** The cursor is opaque to the subcommand; pass it through. The forge lib's per-forge handler decides what's valid (GitHub: numeric; GitLab: ISO timestamp). A malformed cursor produces a forge error, which propagates as exit 1.
-- **`timeout --preserve-status` mirrors ci-watch.** Plain `timeout` returns 124 on timeout; we want exit 0 with no stdout per the contract. Use the same `|| { rc=$?; [[ "$rc" == 124 ]] && exit 0; exit "$rc"; }` shape ci-watch uses.
+- **In-process elapsed-time check, no `timeout(1)` wrap.** ci-watch lifts the wall-clock bound into `_prtend_forge_ci_watch_block_common` so it can short-circuit between polls and `return 124`; reviews-poll's loop lives in the subcommand, so the same pattern lives here: track `start="$SECONDS"`, compare per cycle, return 0 (no output, no cursor write) when the budget is spent. A `timeout --preserve-status` wrap would not produce 124 — `--preserve-status` returns the child's exit status (typically 143 from SIGTERM), defeating the 124-maps-to-clean-timeout contract; and a plain `timeout` wrap would mask the subcommand's own non-zero exits (e.g. PR-closed exit 4 would become 124 if it raced the timeout). Doing it in-process keeps both exit codes and "no partial cursor advance" cleanly under our control.
 - **Cursor is written exactly once per call, after all batches are emitted.** If the second `review_comments` fetch fails mid-batch, no cursor advance — the next call will re-fetch from the same cursor and re-emit. Idempotency on the skill side is guaranteed by the marker (`already_handled` will flip true on the second pass for any thread the skill already replied to).
 
 ### Test shape
