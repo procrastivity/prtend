@@ -1,0 +1,1 @@
+Some arbitrary CI tool emitted this opaque message about something going wrong, but it doesn't match any known heuristic so we'll fall back to the unknown signature.

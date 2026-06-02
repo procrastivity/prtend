@@ -1,0 +1,2 @@
+
+/home/runner/work/proj/src/widget.ts:42:5  error  Unexpected console statement  no-console/no-console

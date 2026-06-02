@@ -1,0 +1,6 @@
+test widget::tests::renders ... FAILED
+
+failures:
+
+---- widget::tests::renders stdout ----
+thread 'widget::tests::renders' panicked at 'assertion failed: lhs == rhs', src/widget.rs:42:5

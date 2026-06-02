@@ -1,0 +1,4 @@
+FAIL src/widget.test.ts
+  ● widget renders correctly
+    Expected: 42
+    Received: NaN
