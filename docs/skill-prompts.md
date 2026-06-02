@@ -352,7 +352,6 @@ This is free-text rather than multi-select because the candidate set is unbounde
 - **Options**:
   - "User config ($XDG_CONFIG_HOME/prtend/) — shared across machines if you sync"
   - "Repo-local (.claude/pr-reviewers.yml) — committed"
-  - "Repo-local but gitignored"
   - "Custom path (I'll set $PRTEND_CONFIG)"
 
 ## `optional-reviewers-prompt` (every PR)
