@@ -2,7 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [prtend--v0.0.3] - 2026-06-02
+## [prtend--v0.0.4] - 2026-06-12
+
+### Miscellaneous Tasks
+- Chore: Chanage wording## [prtend--v0.0.3] - 2026-06-02
 
 ### Documentation
 - Docs: Change plugin description## [prtend--v0.0.2] - 2026-06-02
