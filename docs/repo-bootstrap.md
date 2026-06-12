@@ -86,7 +86,7 @@ Distribution stack (npm, install.sh, docker, multi-bash CI matrix, large fixture
 {
   "name": "prtend",
   "version": "0.1.0",
-  "description": "Tend your PR while you pretend you're not procrastinating. Subscribes to CI and review events after a push, fixes what can be fixed, resolves review comments deterministically.",
+  "description": "Tend your PR while you pretend you're actually still there. Subscribes to CI and review events after a push, fixes what can be fixed, resolves review comments deterministically.",
   "homepage": "https://github.com/procrastivity/prtend",
   "author": {
     "name": "Beau",

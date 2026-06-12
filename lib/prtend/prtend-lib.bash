@@ -21,7 +21,7 @@ prtend_version() {
 
 prtend_usage() {
   cat <<'EOF'
-prtend — tend your PR while you pretend you're not procrastinating
+prtend — tend your PR while you pretend you're actually still there
 
 Usage:
   prtend <subcommand> [options]

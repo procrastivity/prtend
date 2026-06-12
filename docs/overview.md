@@ -2,7 +2,7 @@
 
 > **This doc is the shared workflow reference for `prtend`.** Other planning docs point back here for trigger rules, decision logic, and definitions. Read this first; skim the others as reference material.
 
-`prtend` watches your PR while you pretend you're not procrastinating. After you push code to a branch with an open Pull Request (or Merge Request), it subscribes to CI events and code-review activity on that PR, auto-fixes what looks fixable, and resolves review comments with explicit notes — never marking threads resolved itself, because humans confirm.
+`prtend` watches your PR while you pretend you're actually still there. After you push code to a branch with an open Pull Request (or Merge Request), it subscribes to CI events and code-review activity on that PR, auto-fixes what looks fixable, and resolves review comments with explicit notes — never marking threads resolved itself, because humans confirm.
 
 It ships as two artifacts from one repo:
 
